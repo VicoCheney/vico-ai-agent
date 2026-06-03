@@ -1,0 +1,63 @@
+{
+  "providers": {
+    "mimo": {
+      "base_url": "https://token-plan-sgp.xiaomimimo.com/v1",
+      "api_key_env": "MIMO_API_KEY",
+      "default_model": "mimo-v2.5",
+      "models": {
+        "mimo-v2.5-pro": {
+          "max_tokens": 131072,
+          "temperature": 1.0,
+          "top_p": 0.95,
+          "thinking_enabled": true,
+          "response_format": "text"
+        },
+        "mimo-v2.5": {
+          "max_tokens": 131072,
+          "temperature": 1.0,
+          "top_p": 0.95,
+          "thinking_enabled": true,
+          "response_format": "text"
+        }
+      }
+    },
+    "deepseek": {
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "default_model": "deepseek-v4-flash",
+      "models": {
+        "deepseek-v4-flash": {
+          "max_tokens": 131072,
+          "temperature": 1.0,
+          "top_p": null,
+          "thinking_enabled": true,
+          "reasoning_effort": "max",
+          "response_format": "text"
+        },
+        "deepseek-v4-pro": {
+          "max_tokens": 131072,
+          "temperature": 1.0,
+          "top_p": null,
+          "thinking_enabled": true,
+          "reasoning_effort": "max",
+          "response_format": "text"
+        }
+      }
+    }
+  },
+  "llm": {
+    "default": {
+      "provider": "mimo",
+      "model": "mimo-v2.5"
+    }
+  },
+  "context": {
+    "max_tokens": 1000000,
+    "reserve_tokens": 131072,
+    "compression_threshold": 0.85
+  },
+  "tools": {
+    "auto_approve": ["low"],
+    "timeout_ms": 30000
+  }
+}

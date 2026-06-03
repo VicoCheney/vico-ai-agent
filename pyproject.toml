@@ -1,0 +1,50 @@
+[project]
+name = "vico-ai-agent"
+version = "0.1.0"
+description = "An all-powerful AI agent assistant, armed with imagination"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["ai", "agent", "cli"]
+
+dependencies = [
+    "openai>=1.50.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.7.0",
+    "anyio>=4.4.0",
+    "prompt-toolkit>=3.0.0",
+]
+
+[project.scripts]
+vico = "vico.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vico"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "mypy>=1.8.0",
+    "ruff>=0.3.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]  # line-too-long is handled by formatter, not linter
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
