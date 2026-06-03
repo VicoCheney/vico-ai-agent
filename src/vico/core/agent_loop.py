@@ -144,7 +144,7 @@ class AgentLoop:
             accumulated_text = ""
             pending_tool_calls: list[ToolCall] = []
 
-            stream = await self._llm.stream(
+            stream = self._llm.stream(
                 LLMRequest(
                     system=self._system_prompt,
                     messages=messages,
