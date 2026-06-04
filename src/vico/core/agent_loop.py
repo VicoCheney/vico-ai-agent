@@ -1,14 +1,5 @@
 """
 Agent Loop — The core "think → act → observe" engine
-
-Calls the LLM with the current context and tools, streams the response to
-callbacks, executes tool calls (with permission checks), feeds results back,
-and repeats until a final text response is produced.
-
-Design:
-  - Fully decoupled from UI (communicates only via async callbacks)
-  - Cancellable via asyncio.Event
-  - Configurable iteration limit to prevent infinite loops
 """
 
 from __future__ import annotations

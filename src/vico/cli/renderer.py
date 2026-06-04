@@ -1,36 +1,5 @@
 """
 Terminal Renderer
-
-Conversation layout:
-
-  ─────────────────────────────────────────────────────────
-
-  👤 You: 帮我检查一下电脑状态
-
-  🤖 Vico(mimo/mimo-v2.5-pro):
-
-  💭 Thinking...
-  The user is asking me to perform a health check on their comput……
-
-  好的，我来检查。
-
-  ⠸ execute_command   sw_vers && uname -a
-  ✓ execute_command   sw_vers && uname -a          14 ln
-  ✓ read_file         src/vico/config.py           38 ln
-  ✗ execute_command   df -h /                      exit 1
-
-  综合分析完成。
-
-  ── 3.2s · 1,240 in · 580 out · context 9% ─────────────────────
-  ─────────────────────────────────────────────────────────
-
-Non-TTY: no cursor tricks.
-Design:  Purely presentational. Zero business logic.
-
-Text rendering:
-  - LLM response text is buffered and rendered via rich.Markdown at stream end.
-  - During streaming a rich.Live panel updates in-place (TTY only).
-  - Tool lines use raw ANSI writes; Live is always stopped before tools run.
 """
 
 from __future__ import annotations

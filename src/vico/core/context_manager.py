@@ -1,9 +1,5 @@
 """
 Context Manager
-
-Manages the conversation context window within token budget constraints.
-Tracks messages, estimates token usage (4 chars ≈ 1 token), and
-compresses/truncates when approaching the context limit.
 """
 
 from __future__ import annotations

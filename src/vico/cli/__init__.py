@@ -1,19 +1,5 @@
 """
 CLI Entry Point
-
-Input: Uses prompt-toolkit for readline input with full CJK/unicode support.
-Ctrl+C is handled via key bindings during prompt and via SIGINT during agent execution.
-
-Conversation layout per turn:
-  ─────────────────────────────────────────────────────────
-   │  You  message text
-
-   │  Vico
-  │ 💭 thinking...
-  tool lines...
-  response text...
-  ── context N% ────────────────────────────────────────────
-  ─────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations

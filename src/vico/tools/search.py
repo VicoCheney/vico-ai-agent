@@ -1,8 +1,11 @@
 """
-search — Grep-style text search across the project
+search — Search for text patterns across files using regex.
 
-Uses ripgrep (rg) when available, falls back to native grep.
-Risk level: LOW — read-only operation, auto-approved.
+Uses ripgrep (rg) when available, falls back to grep.
+Returns matching lines with file paths and line numbers, capped at MAX_RESULTS
+and MAX_OUTPUT_CHARS to protect the context window.
+
+Risk level: LOW — read-only, always auto-approved.
 """
 
 from __future__ import annotations
@@ -23,8 +26,8 @@ from vico.core.types import (
     ToolRiskLevel,
 )
 
-MAX_RESULTS = 100
-MAX_OUTPUT_CHARS = 20_000
+MAX_RESULTS = 50
+MAX_OUTPUT_CHARS = 12_000
 
 
 def _has_ripgrep() -> bool:
@@ -41,10 +44,10 @@ class SearchTool(Tool):
         return ToolDefinition(
             name="search",
             description=(
-                "Search for text patterns in files using regex. "
-                "Returns matching lines with file paths and line numbers. "
-                "Supports filtering by file pattern (glob). "
-                "Use this to find function definitions, usages, TODO comments, etc."
+                "Search for text patterns in files using regex (ripgrep). "
+                f"Returns up to {MAX_RESULTS} matching lines with file paths and line numbers. "
+                "Use this to find function definitions, usages, TODO comments, etc. "
+                "If results overflow, narrow the pattern or add a file_pattern filter."
             ),
             parameters=ToolParameterSchema(
                 type="object",
@@ -129,24 +132,35 @@ class SearchTool(Tool):
             )
 
         lines = output.strip().splitlines()
+        match_count = len(lines)
         truncated = False
         display_output = output
         if len(display_output) > MAX_OUTPUT_CHARS:
-            display_output = display_output[:MAX_OUTPUT_CHARS]
+            # Find a clean cut point
+            tail = display_output.rfind("\n", MAX_OUTPUT_CHARS - 2000, MAX_OUTPUT_CHARS)
+            if tail > 0:
+                display_output = display_output[:tail]
             truncated = True
 
         file_info = f" in {file_pattern}" if file_pattern else ""
         trunc_info = " (truncated)" if truncated else ""
         header = (
-            f"Search: {pattern!r}{file_info} — {len(lines)} matches{trunc_info}\n"
+            f"Search: {pattern!r}{file_info} — {match_count} matches{trunc_info}\n"
             f"{'─' * 60}\n"
         )
+
+        if truncated:
+            hint = (
+                "\n\n[Output truncated at ~{:,} characters. "
+                "Refine your regex or restrict the file pattern to narrow results.]".format(MAX_OUTPUT_CHARS)
+            )
+            display_output += hint
 
         return ToolResult(
             success=True,
             output=header + display_output,
             metadata={
-                "matches": len(lines),
+                "matches": match_count,
                 "pattern": pattern,
                 "search_path": str(search_path),
                 "truncated": truncated,

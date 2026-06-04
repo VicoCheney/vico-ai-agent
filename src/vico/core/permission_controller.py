@@ -1,13 +1,5 @@
 """
 Permission Controller
-
-Decides whether a tool call needs user approval before execution.
-Supports "remember for session" to avoid repeated prompting.
-
-Risk matrix:
-  - low:    always auto-approve (read, search)
-  - medium: ask once, remember for session
-  - high:   always ask
 """
 
 from __future__ import annotations

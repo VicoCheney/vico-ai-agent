@@ -1,9 +1,11 @@
 """
-read_file — Tool for reading file contents
+read — Read the contents of any file on disk.
 
-Supports reading full files or specific line ranges.
-Automatically truncates large files with a notice.
-Risk level: LOW — always auto-approved.
+Supports reading the full file or a specific line range (start_line / end_line).
+Automatically truncates files that exceed MAX_CHARS and appends a notice so the
+LLM knows to request a narrower range.
+
+Risk level: LOW — read-only, always auto-approved.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from vico.core.types import (
 MAX_CHARS = 40_000  # ~10K tokens max per read
 
 
-class ReadFileTool(Tool):
+class ReadTool(Tool):
     @property
     def risk_level(self) -> ToolRiskLevel:
         return "low"
@@ -33,7 +35,7 @@ class ReadFileTool(Tool):
     @property
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
-            name="read_file",
+            name="read",
             description=(
                 "Read the contents of a file. For large files, specify line ranges to avoid "
                 "reading too much. Returns file content as text."

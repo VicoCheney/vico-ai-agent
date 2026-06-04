@@ -1,12 +1,5 @@
 """
 DeepSeek LLM
-
-Implements the LLM interface using DeepSeek's OpenAI-compatible API.
-Supports streaming, tool calling, and reasoning mode (deepseek-v4-flash / pro).
-
-Provider-specific behaviour vs the shared base:
-  - Uses `max_tokens` (not `max_completion_tokens`) for output budget.
-  - Sends `thinking` and `reasoning_effort` via `extra_body`.
 """
 
 from __future__ import annotations

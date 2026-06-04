@@ -1,8 +1,16 @@
 """
-execute_command — Run shell commands in the current working directory
+bash — Execute a shell command in the working directory.
 
-Risk level: HIGH — always requires user approval (or explicit override).
-Streams stdout/stderr together and returns combined output.
+Returns combined stdout+stderr output. Enforces a hard output truncation limit
+so large command output does not blow up the context window.
+
+Safety:
+  - Blocks commands that require interactive TTY input (sudo, ssh, passwd, etc.)
+    as they will hang the agent waiting for a password or keystroke.
+  - Runs each command in its own process group so the entire tree can be killed
+    cleanly on timeout or cancellation.
+
+Risk level: HIGH — can modify system state; requires user approval by default.
 """
 
 from __future__ import annotations
@@ -63,7 +71,7 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
             pass
 
 
-class ExecuteCommandTool(Tool):
+class BashTool(Tool):
     @property
     def risk_level(self) -> ToolRiskLevel:
         return "high"
@@ -71,7 +79,7 @@ class ExecuteCommandTool(Tool):
     @property
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
-            name="execute_command",
+            name="bash",
             description=(
                 "Execute a shell command in the working directory. "
                 "Use this to run scripts, install packages, run tests, build projects, "
@@ -205,7 +213,14 @@ class ExecuteCommandTool(Tool):
         exit_code = process.returncode if process.returncode is not None else -1
         header = f"$ {command}\n{'─' * 60}\n"
         if truncated:
-            footer = "\n[... output truncated ...]"
+            tail = output.rfind("\n", MAX_OUTPUT_CHARS - 2000, MAX_OUTPUT_CHARS)
+            if tail > 0:
+                output = output[:tail]
+            footer = (
+                f"\n\n[Output truncated at {MAX_OUTPUT_CHARS:,} characters. "
+                "Use a more specific command (e.g. limit with head/tail, "
+                "filter with grep, or narrow the scope) to see the rest.]"
+            )
         elif timed_out:
             footer = f"\n[Command timed out after {timeout_ms}ms]"
         else:

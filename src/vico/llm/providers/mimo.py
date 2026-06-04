@@ -3,7 +3,7 @@ MiMo LLM Provider
 =================
 
 Implements the LLM interface using Xiaomi MiMo's OpenAI-compatible API.
-Endpoint: https://token-plan-cn.xiaomimimo.com/v1  (Token Plan, CN cluster)
+Endpoint: https://token-plan-sgp.xiaomimimo.com/v1  (Token Plan, SGP cluster)
 
 Provider-specific behaviour vs the shared base:
   - Uses `max_completion_tokens` (not `max_tokens`) — includes reasoning tokens.
@@ -11,8 +11,8 @@ Provider-specific behaviour vs the shared base:
   - Does NOT support `reasoning_effort` (DeepSeek-only).
 
 Token Plan base URLs (OpenAI-compatible):
-  CN:  https://token-plan-cn.xiaomimimo.com/v1   ← default
-  SGP: https://token-plan-sgp.xiaomimimo.com/v1
+  CN:  https://token-plan-cn.xiaomimimo.com/v1
+  SGP: https://token-plan-sgp.xiaomimimo.com/v1   ← default
   AMS: https://token-plan-ams.xiaomimimo.com/v1
 
 Supported models (v2.5 series):

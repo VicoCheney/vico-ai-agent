@@ -57,7 +57,7 @@
     "compression_threshold": 0.85
   },
   "tools": {
-    "auto_approve": ["low"],
+    "auto_approve": ["low", "medium"],
     "timeout_ms": 30000
   }
 }
