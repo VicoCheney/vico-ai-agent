@@ -508,6 +508,7 @@ class TerminalRenderer:
     def on_thinking(self, content: str) -> None:
         """Accumulate thinking text; show compact summary when done."""
         self._ensure_agent_label()
+        self._stop_spinner()
         self._stop_live()
         if not self._thinking_active:
             self._thinking_active = True

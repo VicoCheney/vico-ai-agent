@@ -84,9 +84,10 @@ class BashTool(Tool):
         return ToolDefinition(
             name="bash",
             description=(
-                "Execute a shell command in the working directory. "
-                "Use this to run scripts, install packages, run tests, build projects, "
-                "or any other shell operation. Returns combined stdout and stderr output."
+                "Execute a shell command. Returns combined stdout and stderr.\n"
+                "NEVER use `sudo` — it will be blocked (no password input possible). "
+                "Use non-privileged alternatives instead. If root is truly required, "
+                "tell the user to run it manually."
             ),
             parameters=ToolParameterSchema(
                 type="object",
@@ -136,15 +137,20 @@ class BashTool(Tool):
 
         is_interactive, reason = _is_interactive_command(command)
         if is_interactive:
-            return ToolResult(
-                success=False,
-                output="",
-                error=(
-                    f"Command blocked: {reason}  "
-                    "Tip: use a non-privileged alternative (e.g. read system "
-                    "info via sysctl/sw_vers/system_profiler rather than sudo)."
-                ),
-            )
+            # Provide actionable guidance so the LLM can self-degrade:
+            #   - Try a non-privileged alternative command
+            #   - Or ask the user to run the command manually in their terminal
+            if re.search(r"\bsudo\b", command):
+                error = (
+                    "BLOCKED: `sudo` is not allowed (cannot accept password input). "
+                    "Use a non-privileged alternative, or ask the user to run it manually."
+                )
+            else:
+                error = (
+                    f"BLOCKED: {reason} "
+                    "Use a non-interactive alternative instead."
+                )
+            return ToolResult(success=False, output="", error=error)
 
         if context.cancelled:
             return ToolResult(success=False, output="", error="Cancelled before execution.")
@@ -168,25 +174,59 @@ class BashTool(Tool):
                 error=f"Failed to spawn command: {exc}",
             )
 
+        # ── Streaming read with OOM guard ────────────────────────────────────
+        # Instead of communicate() (which buffers all output in memory before
+        # returning), we read stdout in small chunks and kill the process as
+        # soon as the output budget is exhausted.  This prevents a runaway
+        # command (e.g. `cat /dev/urandom`, `yes`, a 5 GB log grep) from
+        # silently inflating the agent's RSS until the OS OOM-kills it.
+        #
+        # Concurrency model:
+        #   read_task   — streams stdout chunks until EOF or budget exceeded
+        #   cancel_waiter_task — fires when context.cancel_event is set
+        #   asyncio.wait(timeout=…) — enforces the caller-supplied timeout
+        #
+        # All three are raced with asyncio.wait(FIRST_COMPLETED); whichever
+        # wins causes the other two to be cancelled and the process tree to
+        # be killed.
+        # ─────────────────────────────────────────────────────────────────────
+        _READ_CHUNK = 65_536  # 64 KiB per read syscall
+
         output_chunks: list[str] = []
         timed_out = False
+        output_bytes = 0
 
-        communicate_task = asyncio.create_task(process.communicate())
         cancel_event = context.cancel_event
-        # Keep a named reference to the cancel-waiter task so we can cancel it
-        # after the wait completes — preventing a task-leak that keeps the event
-        # loop alive and makes Ctrl+C feel unresponsive.
+
+        async def _read_stream() -> None:
+            """Read stdout until EOF or the output budget is exhausted."""
+            nonlocal output_bytes
+            assert process.stdout is not None
+            while True:
+                chunk = await process.stdout.read(_READ_CHUNK)
+                if not chunk:
+                    break
+                decoded = chunk.decode(errors="replace")
+                output_chunks.append(decoded)
+                output_bytes += len(decoded)
+                if output_bytes >= MAX_OUTPUT_CHARS:
+                    # Budget exceeded — kill the process immediately so it
+                    # stops producing output and consuming CPU/disk.
+                    _kill_process_tree(process)
+                    break
+
+        read_task = asyncio.create_task(_read_stream())
         cancel_waiter_task = asyncio.create_task(cancel_event.wait())
 
         try:
             done, _ = await asyncio.wait(
-                {communicate_task, cancel_waiter_task},
+                {read_task, cancel_waiter_task},
                 timeout=timeout_sec,
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Always cancel the cancel-waiter so it doesn't linger as a
-            # dangling task after this function returns.
+            # Always disarm the cancel-waiter to prevent a dangling task from
+            # keeping the event loop alive after this coroutine returns.
             if not cancel_waiter_task.done():
                 cancel_waiter_task.cancel()
                 try:
@@ -195,38 +235,52 @@ class BashTool(Tool):
                     pass
 
             if not done:
+                # Timeout: kill the process tree and drain the read task.
                 timed_out = True
                 _kill_process_tree(process)
-                communicate_task.cancel()
+                read_task.cancel()
                 try:
-                    await communicate_task
+                    await read_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            elif cancel_event.is_set() and not communicate_task.done():
+            elif cancel_event.is_set() and not read_task.done():
+                # Explicit cancellation by the caller.
                 _kill_process_tree(process)
-                communicate_task.cancel()
+                read_task.cancel()
                 try:
-                    await communicate_task
+                    await read_task
                 except (asyncio.CancelledError, Exception):
                     pass
             else:
-                stdout, _ = communicate_task.result()
-                output_chunks.append(stdout.decode(errors="replace") if stdout else "")
+                # Normal completion or budget-exceeded (process already killed
+                # inside _read_stream).  Await the read task to propagate any
+                # unexpected exceptions.
+                try:
+                    await read_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         except Exception:
             _kill_process_tree(process)
-            communicate_task.cancel()
+            read_task.cancel()
             if not cancel_waiter_task.done():
                 cancel_waiter_task.cancel()
+
+        # Wait for the process to fully exit so returncode is populated.
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+        except (asyncio.TimeoutError, Exception):
+            _kill_process_tree(process)
 
         if context.cancelled and not timed_out:
             return ToolResult(success=False, output="", error="Cancelled during execution.")
 
         output = "".join(output_chunks)
-        truncated = False
-        if len(output) > MAX_OUTPUT_CHARS:
+        # output_bytes may overshoot by up to one chunk (64 KiB) because we
+        # check the budget after appending.  Trim to the hard limit here.
+        truncated = len(output) >= MAX_OUTPUT_CHARS
+        if truncated:
             output = output[:MAX_OUTPUT_CHARS]
-            truncated = True
 
         exit_code = process.returncode if process.returncode is not None else -1
         header = f"$ {command}\n{'─' * 60}\n"
