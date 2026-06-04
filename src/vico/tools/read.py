@@ -90,9 +90,7 @@ class ReadTool(Tool):
             return ToolResult(success=False, output="", error=f"Path is not a file: {file_path}")
 
         try:
-            content = await asyncio.to_thread(
-                file_path.read_text, encoding="utf-8", errors="replace"
-            )
+            content = await asyncio.to_thread(file_path.read_text, encoding="utf-8", errors="replace")
         except OSError as exc:
             return ToolResult(success=False, output="", error=f"Cannot read file: {exc}")
 

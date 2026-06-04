@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -80,10 +81,11 @@ def _find_config_root(cwd: str | None = None) -> Path:
 
     # 4. Package source directory (works for editable installs)
     try:
-        import vico  # type: ignore[import-untyped]
+        import vico  # noqa: F401
+
         pkg_file = Path(vico.__file__).resolve()
-        src_dir = pkg_file.parent.parent   # src/vico/__init__.py → src/
-        project_root = src_dir.parent       # src → project root
+        src_dir = pkg_file.parent.parent  # src/vico/__init__.py → src/
+        project_root = src_dir.parent  # src → project root
         if (project_root / ".vicorc.json").exists():
             return project_root
     except Exception:
@@ -102,16 +104,14 @@ _CONFIG_ROOT = _find_config_root()
 load_dotenv(dotenv_path=_CONFIG_ROOT / ".env")
 
 
-def _load_vicorc(root: Path) -> dict:
+def _load_vicorc(root: Path) -> dict[str, Any]:
     """Load .vicorc.json from the given directory."""
     rc_path = root / ".vicorc.json"
     if rc_path.exists():
         try:
-            return json.loads(rc_path.read_text())
+            return dict(json.loads(rc_path.read_text()))
         except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Invalid JSON in '{rc_path}': {exc}"
-            ) from exc
+            raise ValueError(f"Invalid JSON in '{rc_path}': {exc}") from exc
         except Exception:
             pass
     return {}
@@ -152,8 +152,7 @@ def lookup_provider(provider_name: str) -> dict[str, str]:
     provider = providers.get(provider_name.lower())
     if not provider:
         raise ValueError(
-            f"Unknown provider '{provider_name}'. "
-            f"Supported: {', '.join(providers.keys()) if providers else 'none'}"
+            f"Unknown provider '{provider_name}'. Supported: {', '.join(providers.keys()) if providers else 'none'}"
         )
 
     api_key_env = provider.get("api_key_env", f"{provider_name.upper()}_API_KEY")
@@ -171,7 +170,7 @@ def lookup_provider(provider_name: str) -> dict[str, str]:
 # ─── Internal parsers ────────────────────────────────────────────────────────
 
 
-def _parse_llm_config(rc: dict) -> LLMConfig:
+def _parse_llm_config(rc: dict[str, Any]) -> LLMConfig:
     """
     Parse llm.default section + resolve provider credentials from .env.
 
@@ -205,11 +204,9 @@ def _parse_llm_config(rc: dict) -> LLMConfig:
     model = llm_section.get("model", provider_cfg.get("default_model", ""))
 
     # Per-model hyperparams: providers.<name>.models.<model_name>.*
-    model_params: dict = (
-        provider_cfg.get("models", {}).get(model, {})
-    )
+    model_params: dict[str, Any] = provider_cfg.get("models", {}).get(model, {})
 
-    def _get(key: str, default):
+    def _get(key: str, default: Any) -> Any:
         """Read from per-model params first, then provider-level, then default."""
         if key in model_params:
             return model_params[key]
@@ -232,7 +229,7 @@ def _parse_llm_config(rc: dict) -> LLMConfig:
     )
 
 
-def _parse_context_config(rc: dict) -> ContextConfig:
+def _parse_context_config(rc: dict[str, Any]) -> ContextConfig:
     """Parse context section from .vicorc.json."""
     section = rc.get("context", {})
     return ContextConfig(
@@ -242,7 +239,7 @@ def _parse_context_config(rc: dict) -> ContextConfig:
     )
 
 
-def _parse_tools_config(rc: dict) -> ToolsConfig:
+def _parse_tools_config(rc: dict[str, Any]) -> ToolsConfig:
     """Parse tools section from .vicorc.json."""
     section = rc.get("tools", {})
     return ToolsConfig(

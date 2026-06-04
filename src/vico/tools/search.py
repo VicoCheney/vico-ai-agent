@@ -87,11 +87,9 @@ class SearchTool(Tool):
     ) -> ToolResult:
         pattern = str(params["pattern"])
         search_path = (
-            Path(os.path.join(context.cwd, str(params["path"]))).resolve()
-            if "path" in params
-            else Path(context.cwd)
+            Path(os.path.join(context.cwd, str(params["path"]))).resolve() if "path" in params else Path(context.cwd)
         )
-        file_pattern: str | None = params.get("file_pattern")  # type: ignore[assignment]
+        file_pattern: str | None = str(params["file_pattern"]) if "file_pattern" in params else None
         case_sensitive = bool(params.get("case_sensitive", False))
         max_results = int(params.get("max_results", MAX_RESULTS))
 
@@ -144,15 +142,12 @@ class SearchTool(Tool):
 
         file_info = f" in {file_pattern}" if file_pattern else ""
         trunc_info = " (truncated)" if truncated else ""
-        header = (
-            f"Search: {pattern!r}{file_info} — {match_count} matches{trunc_info}\n"
-            f"{'─' * 60}\n"
-        )
+        header = f"Search: {pattern!r}{file_info} — {match_count} matches{trunc_info}\n{'─' * 60}\n"
 
         if truncated:
             hint = (
-                "\n\n[Output truncated at ~{:,} characters. "
-                "Refine your regex or restrict the file pattern to narrow results.]".format(MAX_OUTPUT_CHARS)
+                f"\n\n[Output truncated at ~{MAX_OUTPUT_CHARS:,} characters. "
+                "Refine your regex or restrict the file pattern to narrow results.]"
             )
             display_output += hint
 

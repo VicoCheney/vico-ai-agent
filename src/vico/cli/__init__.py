@@ -32,15 +32,13 @@ from vico.tools.registry import ToolRegistry
 
 console = Console()
 
-_RESET      = "\033[0m"
-_DIM        = "\033[2m"
-_BOLD       = "\033[1m"
+_RESET = "\033[0m"
+_DIM = "\033[2m"
+_BOLD = "\033[1m"
 _BRIGHT_BLK = "\033[90m"
 _WHITE_BOLD = "\033[1;37m"
 
-_PROMPT_STR = ANSI(
-    f"\n{_BRIGHT_BLK}👤 You: {_RESET}"
-)
+_PROMPT_STR = ANSI(f"\n{_BRIGHT_BLK}👤 You: {_RESET}")
 
 
 # ─── Ctrl+C key binding for prompt-toolkit ───────────────────────────────────
@@ -149,7 +147,7 @@ async def _run_selector(
 
     app_task = asyncio.ensure_future(app.run_async())
     cancel_waiter = asyncio.ensure_future(cancel_event.wait())
-    quit_waiter   = asyncio.ensure_future(quit_event.wait())
+    quit_waiter = asyncio.ensure_future(quit_event.wait())
     done, pending = await asyncio.wait(
         {app_task, cancel_waiter, quit_waiter},
         return_when=asyncio.FIRST_COMPLETED,
@@ -194,11 +192,11 @@ def print_help() -> None:
     console.print("[bold]  Commands[/bold]")
     console.print("[dim]──────────────────────────────────────[/dim]")
     cmds = [
-        ("/clear",              "Clear conversation history"),
-        ("/model",              "Show current provider & model"),
-        ("/model <p/m>",        "Switch model  e.g. deepseek/deepseek-v4-pro"),
-        ("/help",               "Show this message"),
-        ("/exit",               "Exit Vico"),
+        ("/clear", "Clear conversation history"),
+        ("/model", "Show current provider & model"),
+        ("/model <p/m>", "Switch model  e.g. deepseek/deepseek-v4-pro"),
+        ("/help", "Show this message"),
+        ("/exit", "Exit Vico"),
     ]
     for cmd, desc in cmds:
         console.print(f"  [cyan]{cmd:<26}[/cyan][dim]{desc}[/dim]")
@@ -239,10 +237,10 @@ def _handle_model_command(
     if "/" in arg:
         provider, model = arg.split("/", 1)
         provider = provider.strip()
-        model    = model.strip()
+        model = model.strip()
     else:
         provider = config.llm.provider
-        model    = arg
+        model = arg
 
     try:
         provider_config = lookup_provider(provider)
@@ -252,8 +250,7 @@ def _handle_model_command(
 
     if not provider_config["api_key"]:
         console.print(
-            f"  [red]✗[/red]  No API key for '{provider}'.  "
-            f"Set [dim]{provider_config['api_key_env']}[/dim] in .env"
+            f"  [red]✗[/red]  No API key for '{provider}'.  Set [dim]{provider_config['api_key_env']}[/dim] in .env"
         )
         return
 
@@ -274,7 +271,7 @@ def _handle_model_command(
 
     agent.switch_model(new_llm)
     config.llm.provider = provider_config["provider"]
-    config.llm.model    = model
+    config.llm.model = model
     config.llm.base_url = provider_config["base_url"]
     renderer.set_model_label(provider_config["provider"], model)
     permissions.clear_session_approvals()
@@ -350,9 +347,7 @@ async def repl(
 
         # ── Run the agent ─────────────────────────────────────────────────────
         renderer.reset_output_state()
-        run_task: asyncio.Task[None] = asyncio.create_task(
-            agent.run(user_input, max_iterations=30)
-        )
+        run_task: asyncio.Task[None] = asyncio.create_task(agent.run(user_input, max_iterations=30))
         aborted = False
 
         def _run_sigint() -> None:
@@ -362,8 +357,12 @@ async def repl(
                 return
             aborted = True
             agent.cancel()
-            if agent.state == "waiting_approval":
-                run_task.cancel()
+            # Cancel the task unconditionally so that `await run_task` below
+            # always unblocks — regardless of whether the agent is running a
+            # bash command, waiting for an approval dialog, or streaming LLM
+            # output.  Without this, pressing Ctrl+C during a long bash
+            # execution left the repl stuck forever at `await run_task`.
+            run_task.cancel()
             quit_event.set()
 
         _set_sigint(loop, _run_sigint)
@@ -402,7 +401,7 @@ async def async_main() -> None:
     renderer.set_cwd(config.cwd)
 
     quit_event = asyncio.Event()
-    session: PromptSession = PromptSession()
+    session: PromptSession[str] = PromptSession()
 
     tool_registry = ToolRegistry()
     tool_registry.register_all(BUILTIN_TOOLS)
@@ -416,12 +415,14 @@ async def async_main() -> None:
     )
     permissions = PermissionController(auto_approve_risks=config.tools.auto_approve)
 
+    # Wire a permissions checker into the renderer so that on_tool_call() can
+    # decide whether to show a spinner line or wait for the approval dialog.
+    renderer.set_permissions_checker(lambda tc: permissions.is_auto_approved(tc, tool_registry))
+
     async def _approval_cb(
         tool_call: ToolCall,
     ) -> Literal["approve", "approve_always", "deny"]:
-        return await request_approval(
-            tool_call, renderer, session, quit_event, agent._cancel_event
-        )
+        return await request_approval(tool_call, renderer, session, quit_event, agent._cancel_event)
 
     callbacks = AgentCallbacks(
         on_thinking=renderer.on_thinking,

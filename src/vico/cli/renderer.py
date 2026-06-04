@@ -9,6 +9,7 @@ import re
 import sys
 import time
 import unicodedata
+from collections.abc import Callable
 
 from rich.console import Console
 from rich.live import Live
@@ -21,48 +22,48 @@ from vico.core.types import ToolCall, ToolResult
 console = Console(highlight=False)
 
 # ─── ANSI palette ─────────────────────────────────────────────────────────────
-_RESET       = "\033[0m"
-_DIM         = "\033[2m"
-_BOLD        = "\033[1m"
-_ITALIC      = "\033[3m"
-_GREEN       = "\033[32m"
-_RED         = "\033[31m"
-_YELLOW      = "\033[33m"
-_CYAN        = "\033[36m"
-_CYAN_BOLD   = "\033[1;36m"
-_WHITE_BOLD  = "\033[1;37m"
-_BRIGHT_BLK  = "\033[90m"
-_UNDERLINE   = "\033[4m"
-_CLEAR_LINE  = "\033[2K"
+_RESET = "\033[0m"
+_DIM = "\033[2m"
+_BOLD = "\033[1m"
+_ITALIC = "\033[3m"
+_GREEN = "\033[32m"
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+_CYAN = "\033[36m"
+_CYAN_BOLD = "\033[1;36m"
+_WHITE_BOLD = "\033[1;37m"
+_BRIGHT_BLK = "\033[90m"
+_UNDERLINE = "\033[4m"
+_CLEAR_LINE = "\033[2K"
 
 _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 # ─── Column widths ─────────────────────────────────────────────────────────────
-# Proportions (of terminal columns):
-#   icon+space : 2  fixed
-#   name       : 15%  (min 15)
-#   gap        : 2  fixed
-#   param      : 50%  (padded / truncated to exactly this width)
-#   gap        : 2  fixed
-#   stat       : 10%  right-aligned at 75% of terminal width
-#   remainder  : ~25%  intentionally blank
-_TOOL_COL   = 16
-_PARAM_COLS = 48
-_STAT_COL   = 14
+# Layout (proportions of terminal width, icon+space = 2 fixed cols):
+#
+#   icon+space : 2     fixed  ("✓ " or "⠋ ")
+#   tool_col   : 10%   left-aligned   (min 8)
+#   gap        : 2     fixed
+#   param_cols : 60%   left-aligned   (min 20, truncated + padded to exact width)
+#   gap        : 2     fixed
+#   stat_col   : 15%   right-aligned  (min 12)
+#
+# Total guaranteed ≤ terminal width.
 
 
 def _col_widths() -> tuple[int, int, int]:
     """Return (tool_col, param_cols, stat_col) based on current terminal width.
 
-    All content fits within 75% of terminal width.  Stat right-edge lands at
-    exactly int(T * 0.75).
+    Proportions are fixed at 10 / 60 / 15 percent of the terminal width with
+    sensible minimums.  The three columns plus the two 2-char gaps and the
+    2-char icon prefix always fit within the terminal.
     """
     import shutil
+
     term_w = shutil.get_terminal_size(fallback=(100, 24)).columns
-    tool_col   = max(15, int(term_w * 0.15))
-    stat_col   = max(14, int(term_w * 0.10))
-    budget_75  = int(term_w * 0.75)
-    param_cols = max(30, budget_75 - 2 - tool_col - 2 - 2 - stat_col)
+    tool_col = max(8, int(term_w * 0.05))
+    stat_col = max(15, int(term_w * 0.15))
+    param_cols = max(48, int(term_w * 0.60))
     return tool_col, param_cols, stat_col
 
 
@@ -75,21 +76,51 @@ def _is_tty() -> bool:
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
 
+def _char_width(ch: str) -> int:
+    """Return the terminal display width of a single character.
+
+    'W' (Wide) and 'F' (Full-width) are always 2 columns.
+    'A' (Ambiguous) characters such as box-drawing glyphs (═ ─ │) render as
+    2 columns in most modern terminals (macOS Terminal, iTerm2, VS Code) so we
+    treat them as 2 as well.  Narrow / neutral / half-width chars are 1 column.
+
+    Exceptions to the Ambiguous=2 rule:
+    - U+2026 '…' (HORIZONTAL ELLIPSIS): eaw=A but renders as 1 column in all
+      common terminals; treating it as 2 would cause pad_to_width to skip the
+      final space when a truncated string ends with '…', misaligning the stat
+      column by one position.
+
+    Variation selectors (U+FE00–U+FE0F, U+E0100–U+E01EF) and combining marks
+    have zero display width — they modify the preceding character.
+    """
+    cp = ord(ch)
+    # Variation selectors: zero-width modifiers that change glyph presentation
+    if 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF:
+        return 0
+    # Combining diacritical marks and other zero-width combining characters
+    cat = unicodedata.category(ch)
+    if cat in ("Mn", "Me", "Cf"):
+        return 0
+    # U+2026 HORIZONTAL ELLIPSIS: eaw=A but universally renders as 1 column
+    if cp == 0x2026:
+        return 1
+    eaw = unicodedata.east_asian_width(ch)
+    return 2 if eaw in ("W", "F", "A") else 1
+
+
 def _wcslen(s: str) -> int:
-    """Terminal display width (CJK characters count as 2)."""
-    w = 0
-    for ch in s:
-        eaw = unicodedata.east_asian_width(ch)
-        w += 2 if eaw in ("W", "F") else 1
-    return w
+    """Terminal display width of a plain (no ANSI) string."""
+    return sum(_char_width(ch) for ch in s)
 
 
 def _truncate_by_width(s: str, max_width: int) -> str:
     """Truncate s so its display width ≤ max_width, appending '…' if truncated."""
     w = 0
     for i, ch in enumerate(s):
-        eaw = unicodedata.east_asian_width(ch)
-        cw = 2 if eaw in ("W", "F") else 1
+        cw = _char_width(ch)
+        if cw == 0:
+            # Zero-width character: always fits, doesn't advance column
+            continue
         if w + cw > max_width - 1:
             return s[:i] + "…"
         w += cw
@@ -105,14 +136,14 @@ def _pad_to_width(s: str, target_cols: int) -> str:
 
 
 # ─── Rich style constants ──────────────────────────────────────────────────────
-PRIMARY          = "cyan"
-SECONDARY        = "bright_black"
-SUCCESS          = "green"
-ERROR            = "red"
-WARNING          = "yellow"
-SEPARATOR_COLOR  = "bright_black"
+PRIMARY = "cyan"
+SECONDARY = "bright_black"
+SUCCESS = "green"
+ERROR = "red"
+WARNING = "yellow"
+SEPARATOR_COLOR = "bright_black"
 AGENT_NAME_STYLE = "cyan bold"
-TOOL_NAME_STYLE  = "magenta bold"
+TOOL_NAME_STYLE = "magenta bold"
 
 
 # ─── Permission box helpers ──────────────────────────────────────────────────
@@ -128,10 +159,14 @@ def _fmt_perm_param(tool_call: ToolCall, cwd: str = "") -> str:
         if key in tool_call.input:
             val = str(tool_call.input[key])
             if key in ("path", "file") and cwd and val.startswith(cwd):
-                val = val[len(cwd):].lstrip("/\\")
+                val = val[len(cwd) :].lstrip("/\\")
+            # Collapse multi-line values (e.g. shell scripts) to a single line
+            val = " ".join(line.strip() for line in val.splitlines() if line.strip())
             return val
     first_key = next(iter(tool_call.input))
-    return str(tool_call.input[first_key])
+    val = str(tool_call.input[first_key])
+    val = " ".join(line.strip() for line in val.splitlines() if line.strip())
+    return val
 
 
 def _visible_width(s: str) -> int:
@@ -150,13 +185,14 @@ def _perm_box_line(content: str, inner_w: int) -> str:
 def _build_permission_box(tool_call: ToolCall, cwd: str = "") -> list[str]:
     """Build the permission card lines (without trailing newlines)."""
     import shutil
+
     term_w = shutil.get_terminal_size(fallback=(100, 24)).columns
     _PERM_PARAM_MAX_COLS = max(40, int(term_w * 0.50))
 
     param_str = _fmt_perm_param(tool_call, cwd)
 
-    title_plain  = " \U0001f510 Permission Required "
-    tool_plain   = f"Tool    {tool_call.name}"
+    title_plain = " \U0001f510 Permission Required "
+    tool_plain = f"Tool    {tool_call.name}"
 
     if param_str:
         is_cmd = "command" in tool_call.input
@@ -165,13 +201,10 @@ def _build_permission_box(tool_call: ToolCall, cwd: str = "") -> list[str]:
     else:
         display_param = ""
 
-    param_plain  = f"Run     {display_param}" if display_param else ""
+    param_plain = f"Run     {display_param}" if display_param else ""
 
     extra_rows_plain: list[str] = []
-    extra_keys = [
-        k for k in tool_call.input
-        if k not in ("command", "path", "query", "pattern", "url", "file")
-    ]
+    extra_keys = [k for k in tool_call.input if k not in ("command", "path", "query", "pattern", "url", "file")]
     for key in extra_keys[:2]:
         extra_rows_plain.append(f"{key}    {tool_call.input[key]}")
 
@@ -229,10 +262,9 @@ def _fmt_approval_summary(
         stat_color = _BRIGHT_BLK
 
     _tool_col, _param_cols, _stat_col = _col_widths()
-    name_col  = tool_name.ljust(_tool_col)
-    param_truncated = _truncate_by_width(param, _param_cols)
-    param_col = _pad_to_width(param_truncated, _param_cols)
-    stat_r    = stat.rjust(_stat_col)
+    name_col = _collapse_to_single_line(tool_name).ljust(_tool_col)
+    param_col = _pad_to_width(_truncate_by_width(_collapse_to_single_line(param), _param_cols), _param_cols)
+    stat_r = stat.rjust(_stat_col)
     return (
         f"{icon_color}{icon}{_RESET}"
         f" {_CYAN_BOLD}{name_col}{_RESET}"
@@ -243,22 +275,40 @@ def _fmt_approval_summary(
 
 # ─── Tool label helpers ────────────────────────────────────────────────────────
 
-def _tool_label(tool_call: ToolCall, cwd: str = "", max_width: int = 48) -> tuple[str, str]:
-    """(tool_name, param_str). param is relative to cwd when possible."""
+
+def _collapse_to_single_line(s: str) -> str:
+    """Collapse any multi-line string to a single space-separated line.
+
+    This is the single authoritative place for that normalisation so that
+    every code path (spinner, done-row, approval summary) is guaranteed to
+    produce exactly one terminal line for the param column.
+    """
+    return " ".join(part.strip() for part in s.splitlines() if part.strip())
+
+
+def _tool_label(tool_call: ToolCall, cwd: str = "") -> tuple[str, str]:
+    """Return (tool_name, param_str) where param is always a single line.
+
+    The param is:
+    - stripped of the cwd prefix for path/file keys
+    - collapsed to one space-separated line (multi-line commands, etc.)
+    - NOT truncated here; callers must truncate to their own _param_cols budget
+      via _truncate_by_width / _pad_to_width before writing to the terminal.
+    """
     if not tool_call.input:
         return tool_call.name, ""
 
-    def _shorten(key: str, raw: str) -> str:
+    def _normalise(key: str, raw: str) -> str:
         val = raw
         if key in ("path", "file") and cwd and val.startswith(cwd):
-            val = val[len(cwd):].lstrip("/\\")
-        return _truncate_by_width(val, max_width)
+            val = val[len(cwd) :].lstrip("/\\")
+        return _collapse_to_single_line(val)
 
     for key in ("path", "command", "query", "pattern", "url", "file"):
         if key in tool_call.input:
-            return tool_call.name, _shorten(key, str(tool_call.input[key]))
+            return tool_call.name, _normalise(key, str(tool_call.input[key]))
     first_key = next(iter(tool_call.input))
-    return tool_call.name, _shorten(first_key, str(tool_call.input[first_key]))
+    return tool_call.name, _normalise(first_key, str(tool_call.input[first_key]))
 
 
 def _fmt_stat(result: ToolResult) -> str:
@@ -274,24 +324,27 @@ def _fmt_stat(result: ToolResult) -> str:
 
 
 def _fmt_running(frame: str, name: str, param: str) -> str:
+    """Single-line spinner row: <frame> <tool_col>  <param_cols>
+
+    param must already be a single line (ensured by _tool_label); we only
+    truncate + pad it here to fit exactly within _param_cols.
+    """
     _tool_col, _param_cols, _ = _col_widths()
-    name_col  = name.ljust(_tool_col)
-    param_truncated = _truncate_by_width(param, _param_cols)
-    param_col = _pad_to_width(param_truncated, _param_cols)
-    return (
-        f"{_BRIGHT_BLK}{frame} {_RESET}"
-        f"{_CYAN_BOLD}{name_col}{_RESET}"
-        f"  {_DIM}{param_col}{_RESET}"
-    )
+    name_col = _collapse_to_single_line(name).ljust(_tool_col)
+    param_col = _pad_to_width(_truncate_by_width(_collapse_to_single_line(param), _param_cols), _param_cols)
+    return f"{_BRIGHT_BLK}{frame} {_RESET}{_CYAN_BOLD}{name_col}{_RESET}  {_DIM}{param_col}{_RESET}"
 
 
 def _fmt_done(success: bool, name: str, param: str, stat: str) -> str:
+    """Single-line done row: <icon> <tool_col>  <param_cols>  <stat_col>
+
+    Enforces the three-column layout regardless of what the caller supplies.
+    """
     _tool_col, _param_cols, _stat_col = _col_widths()
     icon_color = _GREEN if success else _RED
-    icon       = "✓" if success else "✗"
-    name_col   = name.ljust(_tool_col)
-    param_truncated = _truncate_by_width(param, _param_cols)
-    param_col  = _pad_to_width(param_truncated, _param_cols)
+    icon = "✓" if success else "✗"
+    name_col = _collapse_to_single_line(name).ljust(_tool_col)
+    param_col = _pad_to_width(_truncate_by_width(_collapse_to_single_line(param), _param_cols), _param_cols)
     approval_labels = {"approved", "approved always", "auto approved", "denied"}
     if stat in approval_labels:
         if stat == "approved always":
@@ -318,8 +371,8 @@ def _fmt_done(success: bool, name: str, param: str, stat: str) -> str:
 
 # ─── Stats footer ─────────────────────────────────────────────────────────────
 
-def _fmt_footer(elapsed_s: float, prompt_tokens: int, completion_tokens: int,
-                context_pct: float) -> str:
+
+def _fmt_footer(elapsed_s: float, prompt_tokens: int, completion_tokens: int, context_pct: float) -> str:
     if context_pct >= 80:
         pct_col = _RED
     elif context_pct >= 60:
@@ -327,16 +380,13 @@ def _fmt_footer(elapsed_s: float, prompt_tokens: int, completion_tokens: int,
     else:
         pct_col = _GREEN
 
-    t       = f"time {elapsed_s:.1f}s"
-    tok_in  = f"{prompt_tokens:,}" if prompt_tokens else "\u2014"
+    t = f"time {elapsed_s:.1f}s"
+    tok_in = f"{prompt_tokens:,}" if prompt_tokens else "\u2014"
     tok_out = f"{completion_tokens:,}" if completion_tokens else "\u2014"
     pct_plain = f"{context_pct:.0f}%"
 
     inner_plain = (
-        f"  {t}"
-        f"  \u00b7  input tokens {tok_in}"
-        f"  \u00b7  output tokens {tok_out}"
-        f"  \u00b7  context usage {pct_plain}  "
+        f"  {t}  \u00b7  input tokens {tok_in}  \u00b7  output tokens {tok_out}  \u00b7  context usage {pct_plain}  "
     )
 
     inner_colored = (
@@ -358,6 +408,7 @@ def _fmt_footer(elapsed_s: float, prompt_tokens: int, completion_tokens: int,
 
 # ─── Renderer ─────────────────────────────────────────────────────────────────
 
+
 class TerminalRenderer:
     """
     Purely presentational.
@@ -370,9 +421,9 @@ class TerminalRenderer:
         self._cwd: str = ""
 
         # per-turn state
-        self._agent_label_printed   = False
-        self._had_tool_output       = False
-        self._thinking_active       = False
+        self._agent_label_printed = False
+        self._had_tool_output = False
+        self._thinking_active = False
         self._thinking_buf: list[str] = []
 
         # timing + token tracking
@@ -397,11 +448,23 @@ class TerminalRenderer:
         self._perm_box_tool_name: str = ""
         self._perm_box_param: str = ""
 
+        # Optional callback: (ToolCall) -> bool — True means auto-approved (no dialog)
+        # Set by the caller via set_permissions_checker().
+        self._permissions_checker: Callable[[ToolCall], bool] | None = None
+
     def set_model_label(self, provider: str, model: str) -> None:
         self._model_label = f"({provider}/{model})"
 
     def set_cwd(self, cwd: str) -> None:
         self._cwd = cwd
+
+    def set_permissions_checker(self, checker: Callable[[ToolCall], bool]) -> None:
+        """Register a callback that returns True if a tool call is auto-approved.
+
+        When registered, on_tool_call() will suppress the spinner line for tools
+        that need a permission dialog (so the dialog can take over the terminal).
+        """
+        self._permissions_checker = checker
 
     # ── Session UI ─────────────────────────────────────────────────────────
 
@@ -417,9 +480,7 @@ class TerminalRenderer:
         ]:
             console.print(Text(line, style=f"bold {PRIMARY}"))
         console.print()
-        console.print(
-            Text("  All-powerful AI agent assistant · Armed with imagination", style=SECONDARY)
-        )
+        console.print(Text("  All-powerful AI agent assistant · Armed with imagination", style=SECONDARY))
         console.print()
 
     def print_divider(self) -> None:
@@ -428,9 +489,9 @@ class TerminalRenderer:
     # ── Per-turn reset ──────────────────────────────────────────────────────
 
     def reset_output_state(self) -> None:
-        self._agent_label_printed   = False
-        self._had_tool_output       = False
-        self._thinking_active       = False
+        self._agent_label_printed = False
+        self._had_tool_output = False
+        self._thinking_active = False
         self._thinking_buf.clear()
         self._text_buf.clear()
         self._streaming_text = False
@@ -438,8 +499,8 @@ class TerminalRenderer:
         self._batch.clear()
         self._done_ids.clear()
         self._batch_size = 0
-        self._turn_start_time        = time.monotonic()
-        self._last_prompt_tokens     = 0
+        self._turn_start_time = time.monotonic()
+        self._last_prompt_tokens = 0
         self._last_completion_tokens = 0
 
     # ── Agent callbacks ─────────────────────────────────────────────────────
@@ -480,27 +541,46 @@ class TerminalRenderer:
         self._batch[tool_call.id] = (idx, name, param)
         self._batch_size += 1
 
-        frame = _FRAMES[self._frame_idx % len(_FRAMES)]
-        _write(_fmt_running(frame, name, param) + "\n")
-        self._had_tool_output = True
+        # For tools that will need a permission approval dialog, do NOT
+        # write a spinner line here: print_permission_request() takes over
+        # the terminal.  We still register the tool in self._batch above so
+        # that on_tool_result() can write the final summary line correctly.
+        needs_approval = not self._permissions_checker(tool_call) if self._permissions_checker else False
+        if not needs_approval:
+            frame = _FRAMES[self._frame_idx % len(_FRAMES)]
+            _write(_fmt_running(frame, name, param) + "\n")
+            self._had_tool_output = True
 
-        if _is_tty() and self._spinner_task is None:
-            try:
-                loop = asyncio.get_running_loop()
-                self._spinner_task = loop.create_task(self._spin_loop())
-            except RuntimeError:
-                pass
+            if _is_tty() and self._spinner_task is None:
+                try:
+                    loop = asyncio.get_running_loop()
+                    self._spinner_task = loop.create_task(self._spin_loop())
+                except RuntimeError:
+                    pass
 
     def on_tool_result(self, tool_call: ToolCall, result: ToolResult) -> None:
         stat = _fmt_stat(result)
         if tool_call.id not in self._batch:
-            # Tool had no spinner line (required approval).
-            # collapse_permission_request() already wrote the result summary line.
+            # Tool was never registered (should not happen with current flow).
             return
+
         idx, name, param = self._batch[tool_call.id]
-        done_line = _fmt_done(result.success, name, param, stat)
         self._done_ids.add(tool_call.id)
 
+        # Check if this tool went through the permission dialog.
+        # If so, collapse_permission_request() already wrote the approval summary
+        # line in the correct terminal position.  Writing another done_line via
+        # _overwrite_async would produce a duplicate line (the second stray ✓ row
+        # seen in the case).  Skip the overwrite for approved/denied tools.
+        was_approved = bool(
+            result.metadata and result.metadata.get("approval") in ("approved", "approved always", "denied")
+        )
+        if was_approved:
+            self._had_tool_output = True
+            return
+
+        # Auto-approved path: overwrite the spinner row in-place.
+        done_line = _fmt_done(result.success, name, param, stat)
         if _is_tty():
             try:
                 loop = asyncio.get_running_loop()
@@ -514,40 +594,79 @@ class TerminalRenderer:
     # ── Token tracking ──────────────────────────────────────────────────────
 
     def on_done_with_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
-        self._last_prompt_tokens     = prompt_tokens
+        self._last_prompt_tokens = prompt_tokens
         self._last_completion_tokens = completion_tokens
 
     # ── Spinner ─────────────────────────────────────────────────────────────
 
     async def _spin_loop(self) -> None:
+        """Animate the spinner for all pending tool rows.
+
+        Strategy: build one contiguous ANSI string that
+          1. jumps to the topmost pending row
+          2. rewrites every pending row top-to-bottom
+          3. moves the cursor back to the bottom (after the last tool row)
+        This keeps all cursor movement inside a single write() call so
+        that concurrent on_tool_call() / _overwrite_async() calls that
+        hold the same render_lock never interfere with mid-flight cursor
+        positioning.
+        """
         try:
             while True:
                 await asyncio.sleep(0.08)
                 self._frame_idx += 1
                 frame = _FRAMES[self._frame_idx % len(_FRAMES)]
                 async with self._render_lock:
-                    pending = [(tid, info) for tid, info in self._batch.items()
-                               if tid not in self._done_ids]
+                    pending = sorted(
+                        [(tid, info) for tid, info in self._batch.items() if tid not in self._done_ids],
+                        key=lambda x: x[1][0],  # sort by idx (top row first)
+                    )
                     if not pending:
                         break
+
+                    # Cursor is currently sitting one line below the last
+                    # tool row (the \n after each _write call leaves it there).
+                    # _batch_size == total rows written; cursor is at row index
+                    # _batch_size (0-indexed from first tool row).
+                    #
+                    # We jump to the topmost pending row, then write each row
+                    # sequentially.  At the end the cursor is just below the
+                    # last rewritten row; we move it down to row _batch_size.
+
+                    topmost_idx = pending[0][1][0]
+                    # lines to move up from current position (below last row)
+                    # current cursor row index = _batch_size
+                    # target row index = topmost_idx
+                    # rows to move up = _batch_size - topmost_idx
+                    lines_to_top = self._batch_size - topmost_idx
+                    buf = f"\033[{lines_to_top}A"  # move up to topmost row
+
+                    prev_idx = topmost_idx
                     for _, (idx, name, param) in pending:
-                        lines_up = self._batch_size - idx
-                        sys.stdout.write(
-                            f"\033[{lines_up}A\r{_CLEAR_LINE}"
-                            f"{_fmt_running(frame, name, param)}\n"
-                            f"\033[{lines_up - 1}B"
-                        )
+                        # skip blank rows between pending rows
+                        gap = idx - prev_idx
+                        if gap > 0:
+                            buf += f"\033[{gap}B"  # move down gap rows
+                        buf += f"\r{_CLEAR_LINE}{_fmt_running(frame, name, param)}"
+                        prev_idx = idx
+
+                    # Move cursor back down to _batch_size row
+                    # (one below the last tool row)
+                    rows_to_bottom = self._batch_size - prev_idx
+                    if rows_to_bottom > 0:
+                        buf += f"\033[{rows_to_bottom}B"
+                    buf += "\r"
+
+                    sys.stdout.write(buf)
                     sys.stdout.flush()
         finally:
             self._spinner_task = None
 
     async def _overwrite_async(self, idx: int, new_line: str) -> None:
+        """Overwrite a specific tool row in-place (used when tool completes)."""
         async with self._render_lock:
             lines_up = self._batch_size - idx
-            sys.stdout.write(
-                f"\033[{lines_up}A\r{_CLEAR_LINE}{new_line}\n"
-                f"\033[{lines_up - 1}B"
-            )
+            sys.stdout.write(f"\033[{lines_up}A\r{_CLEAR_LINE}{new_line}\n\033[{lines_up - 1}B")
             sys.stdout.flush()
 
     def _stop_spinner(self) -> None:
@@ -621,6 +740,7 @@ class TerminalRenderer:
         self._thinking_buf.clear()
         if full:
             import shutil
+
             term_w = shutil.get_terminal_size(fallback=(100, 24)).columns
             max_w = max(40, int(term_w * 0.75))
             summary = _truncate_by_width(full, max_w)
@@ -641,9 +761,9 @@ class TerminalRenderer:
         sys.stdout.flush()
 
         self._perm_box_line_count = 1 + len(lines)
-        self._perm_box_tool_name  = tool_call.name
-        self._perm_box_param      = _fmt_perm_param(tool_call, self._cwd)
-        self._had_tool_output     = True
+        self._perm_box_tool_name = tool_call.name
+        self._perm_box_param = _fmt_perm_param(tool_call, self._cwd)
+        self._had_tool_output = True
 
     def collapse_permission_request(self, decision: str) -> None:
         """Replace the permission card with a single compact summary line.
@@ -652,18 +772,17 @@ class TerminalRenderer:
         writes the one-line summary.  Updates _batch_size so that any
         remaining spinner-row offsets stay valid.
         """
-        summary = _fmt_approval_summary(
-            decision, self._perm_box_tool_name, self._perm_box_param
-        )
+        summary = _fmt_approval_summary(decision, self._perm_box_tool_name, self._perm_box_param)
         if _is_tty() and self._perm_box_line_count > 0:
             n = self._perm_box_line_count
-            sys.stdout.write(
-                f"\033[{n}A"
-                f"\r"
-                f"\033[J"
-                f"{summary}\n"
-            )
+            sys.stdout.write(f"\033[{n}A\r\033[J{summary}\n")
             sys.stdout.flush()
+            # The permission box occupied n lines; it's now replaced by 1 summary
+            # line.  Increase _batch_size by (n - 1) so that overwrite offsets for
+            # any OTHER spinner rows that were written BEFORE the permission box
+            # remain correct.  The current tool's own "row" is represented by the
+            # summary line itself — its idx in self._batch was set in on_tool_call()
+            # and points to the logical position above the current cursor.
             self._batch_size += n - 1
         else:
             _write(summary + "\n")
@@ -692,11 +811,12 @@ class TerminalRenderer:
     def print_context_stats(self, stats: ContextStats) -> None:
         elapsed = time.monotonic() - self._turn_start_time if self._turn_start_time else 0.0
         _write(
-            "\n" +
-            _fmt_footer(
-                elapsed_s          = elapsed,
-                prompt_tokens      = self._last_prompt_tokens,
-                completion_tokens  = self._last_completion_tokens,
-                context_pct        = stats.usage_percent,
-            ) + "\n"
+            "\n"
+            + _fmt_footer(
+                elapsed_s=elapsed,
+                prompt_tokens=self._last_prompt_tokens,
+                completion_tokens=self._last_completion_tokens,
+                context_pct=stats.usage_percent,
+            )
+            + "\n"
         )

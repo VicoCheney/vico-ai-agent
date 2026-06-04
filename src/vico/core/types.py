@@ -205,8 +205,8 @@ class LLMRequest:
     top_p: float | None = None
     stop: list[str] | None = None
     thinking_enabled: bool | None = None
-    reasoning_effort: str | None = None         # "high" | "max" (DeepSeek)
-    response_format: str | None = None          # "text" | "json_object"
+    reasoning_effort: str | None = None  # "high" | "max" (DeepSeek)
+    response_format: str | None = None  # "text" | "json_object"
 
 
 class LLM(ABC):
@@ -245,8 +245,8 @@ class LLMConfig:
     top_p: float | None = None
     stop: list[str] | None = None
     thinking_enabled: bool = True
-    reasoning_effort: str = "max"           # DeepSeek: "high" | "max"
-    response_format: str = "text"           # "text" | "json_object"
+    reasoning_effort: str = "max"  # DeepSeek: "high" | "max"
+    response_format: str = "text"  # "text" | "json_object"
 
 
 @dataclass

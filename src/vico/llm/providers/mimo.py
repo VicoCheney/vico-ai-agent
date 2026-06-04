@@ -42,19 +42,20 @@ _MIMO_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 @dataclass
 class MiMoConfig:
     """Runtime configuration for the MiMo provider."""
+
     api_key: str
     base_url: str = _MIMO_BASE_URL
     model: str = "mimo-v2.5-pro"
     # ── Sampling ──────────────────────────────────────────────────────────────
     max_completion_tokens: int = 131072
-    temperature: float = 1.0        # MiMo pro/omni default is 1.0
-    top_p: float | None = None      # None = API default (0.95 for MiMo)
+    temperature: float = 1.0  # MiMo pro/omni default is 1.0
+    top_p: float | None = None  # None = API default (0.95 for MiMo)
     stop: list[str] | None = None
     # ── Reasoning / thinking mode ─────────────────────────────────────────────
-    thinking_enabled: bool = True   # maps to thinking.type = "enabled"/"disabled"
+    thinking_enabled: bool = True  # maps to thinking.type = "enabled"/"disabled"
     # (MiMo does NOT support reasoning_effort — that's DeepSeek-only)
     # ── Output format ─────────────────────────────────────────────────────────
-    response_format: str = "text"   # "text" | "json_object"
+    response_format: str = "text"  # "text" | "json_object"
 
 
 class MiMoLLM(OpenAICompatibleLLM):
@@ -88,7 +89,7 @@ class MiMoLLM(OpenAICompatibleLLM):
         info = MIMO_MODELS.get(self._config.model)
         return info.supports_vision if info else False
 
-    async def stream(self, request: LLMRequest) -> AsyncIterator[StreamChunk]:  # type: ignore[override]
+    async def stream(self, request: LLMRequest) -> AsyncIterator[StreamChunk]:
         messages = self._build_messages(request)
         tools = self._build_tools(request.tools) if self.supports_tool_use() else None
 
@@ -96,18 +97,12 @@ class MiMoLLM(OpenAICompatibleLLM):
         max_completion_tokens = request.max_tokens or self._config.max_completion_tokens
 
         # Per-request overrides take precedence over config defaults
-        temperature = (
-            request.temperature
-            if request.temperature is not None
-            else self._config.temperature
-        )
+        temperature = request.temperature if request.temperature is not None else self._config.temperature
         top_p = request.top_p if request.top_p is not None else self._config.top_p
         stop = request.stop if request.stop is not None else self._config.stop
 
         thinking_enabled = (
-            request.thinking_enabled
-            if request.thinking_enabled is not None
-            else self._config.thinking_enabled
+            request.thinking_enabled if request.thinking_enabled is not None else self._config.thinking_enabled
         )
         thinking_param = {"type": "enabled" if thinking_enabled else "disabled"}
 
@@ -135,7 +130,7 @@ class MiMoLLM(OpenAICompatibleLLM):
         kwargs["extra_body"] = {"thinking": thinking_param}
 
         try:
-            raw_stream = await self._client.chat.completions.create(**kwargs)  # type: ignore[arg-type]
+            raw_stream = await self._client.chat.completions.create(**kwargs)
         except Exception as exc:
             yield ErrorChunk(error=exc)
             return

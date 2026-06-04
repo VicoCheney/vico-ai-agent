@@ -40,6 +40,7 @@ ApprovalCallback = Callable[[ToolCall], Coroutine[Any, Any, Literal["approve", "
 @dataclass
 class AgentCallbacks:
     """All event callbacks from the agent loop to the UI."""
+
     on_thinking: OnThinkingCallback | None = None
     on_text: OnTextCallback | None = None
     on_tool_call: OnToolCallCallback | None = None
@@ -126,11 +127,7 @@ class AgentLoop:
 
             # ── Step 1: Call LLM ─────────────────────────────────────────
             messages = self._context.get_messages()
-            tool_defs = (
-                self._tool_registry.get_definitions()
-                if self._llm.supports_tool_use()
-                else None
-            )
+            tool_defs = self._tool_registry.get_definitions() if self._llm.supports_tool_use() else None
 
             accumulated_text = ""
             pending_tool_calls: list[ToolCall] = []
@@ -145,7 +142,7 @@ class AgentLoop:
                 )
             )
 
-            async for chunk in stream:  # type: ignore[union-attr]
+            async for chunk in stream:
                 if self._cancel_event.is_set():
                     break
 
@@ -164,7 +161,7 @@ class AgentLoop:
                     pending_tool_calls.append(chunk.tool_call)
 
                 elif isinstance(chunk, DoneChunk):
-                    pt = chunk.usage.prompt_tokens     if chunk.usage else 0
+                    pt = chunk.usage.prompt_tokens if chunk.usage else 0
                     ct = chunk.usage.completion_tokens if chunk.usage else 0
                     if chunk.usage:
                         self._context.update_last_usage(chunk.usage)
@@ -178,10 +175,7 @@ class AgentLoop:
             # ── Step 2: Save assistant response to context ───────────────
             self._context.add_assistant_message(
                 text=accumulated_text,
-                tool_calls=[
-                    {"id": tc.id, "name": tc.name, "input": tc.input}
-                    for tc in pending_tool_calls
-                ],
+                tool_calls=[{"id": tc.id, "name": tc.name, "input": tc.input} for tc in pending_tool_calls],
             )
 
             # ── Step 3: If no tool calls, we're done ─────────────────────
@@ -195,23 +189,23 @@ class AgentLoop:
             # Otherwise, run all tools concurrently for speed.
 
             needs_approval = any(
-                not self._permissions.is_auto_approved(tc, self._tool_registry)
-                for tc in pending_tool_calls
+                not self._permissions.is_auto_approved(tc, self._tool_registry) for tc in pending_tool_calls
             )
 
             if needs_approval:
                 tool_results: list[tuple[ToolCall, ToolResult]] = []
                 for tc in pending_tool_calls:
-                    is_auto = self._permissions.is_auto_approved(tc, self._tool_registry)
                     cb_tc = self._callbacks.on_tool_call
-                    if is_auto:
-                        if cb_tc:
-                            cb_tc(tc)
-                        # Execute immediately so the spinner resolves before the
-                        # permission box for the next tool appears.
-                        result_pair = await self._execute_one(tc)
-                    else:
-                        result_pair = await self._execute_one(tc)
+                    # Always notify the renderer so it can track the tool call.
+                    # For auto-approved tools this starts the spinner; for tools
+                    # that need approval the renderer records the call so that
+                    # collapse_permission_request() and on_tool_result() work
+                    # correctly even when they skip the spinner row.
+                    if cb_tc:
+                        cb_tc(tc)
+                    # Execute immediately so the spinner resolves before the
+                    # permission box for the next tool appears.
+                    result_pair = await self._execute_one(tc)
                     tool_results.append(result_pair)
             else:
                 cb_tc = self._callbacks.on_tool_call
@@ -279,7 +273,9 @@ class AgentLoop:
                         approval_label = "approved always"
                     elif decision == "deny":
                         denied = ToolResult(
-                            success=False, output="", error="Tool execution denied by user.",
+                            success=False,
+                            output="",
+                            error="Tool execution denied by user.",
                             metadata={"approval": "denied"},
                         )
                         cb_tr = self._callbacks.on_tool_result

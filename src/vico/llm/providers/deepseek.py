@@ -21,19 +21,20 @@ from vico.llm.providers.base import OpenAICompatibleLLM
 @dataclass
 class DeepSeekConfig:
     """Configuration for DeepSeek provider (runtime parameters)."""
+
     api_key: str
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-v4-flash"
     # ── Sampling ──────────────────────────────────────────────────────────────
     max_tokens: int = 131072
     temperature: float = 1.0
-    top_p: float | None = None          # None = API default (1.0)
+    top_p: float | None = None  # None = API default (1.0)
     stop: list[str] | None = None
     # ── Reasoning / thinking mode ─────────────────────────────────────────────
-    thinking_enabled: bool = True       # enable chain-of-thought by default
-    reasoning_effort: str = "max"       # "high" | "max"
+    thinking_enabled: bool = True  # enable chain-of-thought by default
+    reasoning_effort: str = "max"  # "high" | "max"
     # ── Output format ─────────────────────────────────────────────────────────
-    response_format: str = "text"       # "text" | "json_object"
+    response_format: str = "text"  # "text" | "json_object"
 
 
 class DeepSeekLLM(OpenAICompatibleLLM):
@@ -59,7 +60,7 @@ class DeepSeekLLM(OpenAICompatibleLLM):
     def supports_vision(self) -> bool:
         return False
 
-    async def stream(self, request: LLMRequest) -> AsyncIterator[StreamChunk]:  # type: ignore[override]
+    async def stream(self, request: LLMRequest) -> AsyncIterator[StreamChunk]:
         messages = self._build_messages(request)
         tools = self._build_tools(request.tools) if self.supports_tool_use() else None
 
@@ -70,9 +71,7 @@ class DeepSeekLLM(OpenAICompatibleLLM):
         stop = request.stop if request.stop is not None else self._config.stop
 
         thinking_enabled = (
-            request.thinking_enabled
-            if request.thinking_enabled is not None
-            else self._config.thinking_enabled
+            request.thinking_enabled if request.thinking_enabled is not None else self._config.thinking_enabled
         )
         reasoning_effort = request.reasoning_effort or self._config.reasoning_effort
         thinking_param = {"type": "enabled" if thinking_enabled else "disabled"}
@@ -105,7 +104,7 @@ class DeepSeekLLM(OpenAICompatibleLLM):
         kwargs["extra_body"] = extra_body
 
         try:
-            raw_stream = await self._client.chat.completions.create(**kwargs)  # type: ignore[arg-type]
+            raw_stream = await self._client.chat.completions.create(**kwargs)
         except Exception as exc:
             yield ErrorChunk(error=exc)
             return

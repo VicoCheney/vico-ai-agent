@@ -53,7 +53,10 @@ def _is_interactive_command(command: str) -> tuple[bool, str]:
     normalized = command.strip()
     for pat in _INTERACTIVE_PATTERNS:
         if pat.search(normalized):
-            return True, f"Command contains a pattern matching '{pat.pattern}' which may require interactive TTY input (password prompt). Use a non-privileged or non-interactive alternative."
+            return (
+                True,
+                f"Command contains a pattern matching '{pat.pattern}' which may require interactive TTY input (password prompt). Use a non-privileged or non-interactive alternative.",
+            )
     return False, ""
 
 
@@ -170,13 +173,26 @@ class BashTool(Tool):
 
         communicate_task = asyncio.create_task(process.communicate())
         cancel_event = context.cancel_event
+        # Keep a named reference to the cancel-waiter task so we can cancel it
+        # after the wait completes — preventing a task-leak that keeps the event
+        # loop alive and makes Ctrl+C feel unresponsive.
+        cancel_waiter_task = asyncio.create_task(cancel_event.wait())
 
         try:
             done, _ = await asyncio.wait(
-                {communicate_task, asyncio.create_task(cancel_event.wait())},
+                {communicate_task, cancel_waiter_task},
                 timeout=timeout_sec,
                 return_when=asyncio.FIRST_COMPLETED,
             )
+
+            # Always cancel the cancel-waiter so it doesn't linger as a
+            # dangling task after this function returns.
+            if not cancel_waiter_task.done():
+                cancel_waiter_task.cancel()
+                try:
+                    await cancel_waiter_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
             if not done:
                 timed_out = True
@@ -200,6 +216,8 @@ class BashTool(Tool):
         except Exception:
             _kill_process_tree(process)
             communicate_task.cancel()
+            if not cancel_waiter_task.done():
+                cancel_waiter_task.cancel()
 
         if context.cancelled and not timed_out:
             return ToolResult(success=False, output="", error="Cancelled during execution.")

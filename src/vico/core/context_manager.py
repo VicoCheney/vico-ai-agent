@@ -7,6 +7,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from vico.core.types import (
     ContentBlock,
@@ -59,7 +60,7 @@ class ContextManager:
     def add_assistant_message(
         self,
         text: str,
-        tool_calls: list[dict] | None = None,  # [{id, name, input}]
+        tool_calls: list[dict[str, Any]] | None = None,  # [{id, name, input}]
     ) -> None:
         blocks: list[ContentBlock] = []
         if text:

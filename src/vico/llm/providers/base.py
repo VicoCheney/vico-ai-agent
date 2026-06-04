@@ -76,9 +76,7 @@ class OpenAICompatibleLLM(LLM):
                 content = (
                     msg.content
                     if isinstance(msg.content, str)
-                    else "".join(
-                        b.text for b in msg.content if hasattr(b, "text")  # type: ignore[union-attr]
-                    )
+                    else "".join(b.text for b in msg.content if hasattr(b, "text"))
                 )
                 result.append({"role": "user", "content": content})
 
@@ -86,25 +84,27 @@ class OpenAICompatibleLLM(LLM):
                 if isinstance(msg.content, str):
                     result.append({"role": "assistant", "content": msg.content})
                 else:
-                    text_parts = [b.text for b in msg.content if b.type == "text"]  # type: ignore[union-attr]
+                    text_parts = [b.text for b in msg.content if b.type == "text"]  # noqa: E501
                     tool_uses = [b for b in msg.content if b.type == "tool_use"]
 
                     if tool_uses:
-                        result.append({
-                            "role": "assistant",
-                            "content": "".join(text_parts) or None,
-                            "tool_calls": [
-                                {
-                                    "id": tc.id,  # type: ignore[union-attr]
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc.name,  # type: ignore[union-attr]
-                                        "arguments": json.dumps(tc.input),  # type: ignore[union-attr]
-                                    },
-                                }
-                                for tc in tool_uses
-                            ],
-                        })
+                        result.append(
+                            {
+                                "role": "assistant",
+                                "content": "".join(text_parts) or None,
+                                "tool_calls": [
+                                    {
+                                        "id": tc.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": tc.name,
+                                            "arguments": json.dumps(tc.input),
+                                        },
+                                    }
+                                    for tc in tool_uses
+                                ],
+                            }
+                        )
                     else:
                         result.append({"role": "assistant", "content": "".join(text_parts)})
 
@@ -112,11 +112,13 @@ class OpenAICompatibleLLM(LLM):
                 if isinstance(msg.content, list):
                     for block in msg.content:
                         if block.type == "tool_result":
-                            result.append({
-                                "role": "tool",
-                                "tool_call_id": block.tool_use_id,  # type: ignore[union-attr]
-                                "content": block.content,  # type: ignore[union-attr]
-                            })
+                            result.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": block.tool_use_id,
+                                    "content": block.content,
+                                }
+                            )
 
         return result
 

@@ -71,10 +71,7 @@ def _build_llm(
         # Validate model against registry; fail fast if unknown.
         if model not in MIMO_MODELS:
             available = ", ".join(MIMO_MODELS.keys())
-            raise ValueError(
-                f"Unknown MiMo model: {model!r}. "
-                f"Supported models: {available}"
-            )
+            raise ValueError(f"Unknown MiMo model: {model!r}. Supported models: {available}")
         return MiMoLLM(
             MiMoConfig(
                 api_key=api_key,
@@ -90,6 +87,4 @@ def _build_llm(
             )
         )
 
-    raise ValueError(
-        f"Unknown LLM provider: {provider!r}. Supported: deepseek, mimo"
-    )
+    raise ValueError(f"Unknown LLM provider: {provider!r}. Supported: deepseek, mimo")

@@ -39,6 +39,7 @@ _GIT_CACHE_TTL = 30.0  # seconds — re-fetch after 30s to reflect new commits
 
 def _get_git_info_cached(cwd: str) -> str:
     import time
+
     cached = _git_info_cache.get(cwd)
     now = time.monotonic()
     if cached and (now - cached[0]) < _GIT_CACHE_TTL:
@@ -61,7 +62,7 @@ You operate in a terminal environment with direct access to tools for reading, e
 and executing commands on the local machine.
 
 # Environment
-- OS: {os_name} ({'macOS — remember `sed -i '''' "''' if os_name == 'Darwin' else 'Linux'})
+- OS: {os_name} ({"macOS — remember `sed -i " ''' "''' if os_name == "Darwin" else "Linux"})
 - Shell: {shell}
 - Working directory: {cwd}
 - Current time: {now}

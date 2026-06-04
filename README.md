@@ -1,14 +1,15 @@
 # Vico AI Agent 🤖
 
-> A minimal AI coding assistant, inspired by Claude Code and Codex. Built in Python, powered by MiMo / DeepSeek.
+> An all-powerful AI agent assistant, armed with imagination.
 
 ## 功能特性
 
 - 🔄 **Agent Loop** — Think → Act → Observe 循环，支持多轮工具调用
-- 🔧 **3 个核心工具**：
-  - `read_file` — 读取文件内容，支持行范围
-  - `execute_command` — 执行 Shell 命令（高风险，需确认）
+- 🔧 **4 个核心工具**：
+  - `read` — 读取文件内容，支持行范围
+  - `bash` — 执行 Shell 命令（高风险，需确认）
   - `search` — 正则搜索代码（优先使用 ripgrep）
+  - `edit` — 精确字符串替换编辑文件（中风险，需确认）
 - 🛡️ **权限控制** — 危险操作前弹出确认框，支持"本次批准 / 本会话始终批准 / 拒绝"
 - 💭 **Thinking 展示** — 实时流式展示模型推理过程
 - 🎨 **终端 UI** — 彩色 Spinner、比例对齐的工具执行行、Markdown 渲染
@@ -17,6 +18,28 @@
 ---
 
 ## 快速开始
+
+> 已有一键安装脚本，clone 后一条命令即可完成所有配置并启动。
+
+### 方式一：一键安装（推荐）
+
+```bash
+git clone https://github.com/VicoCheney/vico-ai-agent.git
+cd vico-ai-agent
+bash setup.sh
+```
+
+**可选参数：**
+
+```bash
+bash setup.sh --global     # 同时全局安装，任意目录可直接运行 vico
+bash setup.sh --no-launch  # 完成安装后不自动启动
+bash setup.sh --help       # 查看所有参数说明
+```
+
+---
+
+### 方式二：手动安装（分步）
 
 > 以下步骤适用于**全新 macOS**，从零开始到跑起来。
 
@@ -130,6 +153,7 @@ uv run vico
 
 ```bash
 uv tool install . --force --editable
+# 或使用安装脚本：bash setup.sh --global
 ```
 
 之后在终端任意位置输入 `vico` 即可启动：
@@ -165,8 +189,9 @@ Vico 在执行工具前会根据风险等级决定是否需要用户确认：
 
 | 级别 | 工具 | 行为 |
 |------|------|------|
-| `low` | `read_file`, `search` | 自动执行，无需确认 |
-| `high` | `execute_command` | 弹出权限确认框 |
+| `low` | `read`, `search` | 自动执行，无需确认 |
+| `medium` | `edit` | 弹出权限确认框 |
+| `high` | `bash` | 弹出权限确认框 |
 
 权限确认框选项：
 - **`y`** 或直接回车 → 本次批准
@@ -195,8 +220,9 @@ src/vico/
 ├── tools/
 │   ├── __init__.py               # 内置工具列表
 │   ├── registry.py               # 工具注册表 + 调度器
-│   ├── read_file.py              # read_file 工具
-│   ├── execute_command.py        # execute_command 工具
+│   ├── read.py                   # read 工具
+│   ├── bash.py                   # bash 工具
+│   ├── edit.py                   # edit 工具
 │   └── search.py                 # search 工具（ripgrep / grep）
 ├── cli/
 │   ├── __init__.py               # CLI 入口 + REPL 主循环

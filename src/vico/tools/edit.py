@@ -113,9 +113,7 @@ class EditTool(Tool):
             return ToolResult(success=False, output="", error=f"Path is not a file: {file_path}")
 
         try:
-            original = await asyncio.to_thread(
-                file_path.read_text, encoding="utf-8", errors="replace"
-            )
+            original = await asyncio.to_thread(file_path.read_text, encoding="utf-8", errors="replace")
         except OSError as exc:
             return ToolResult(success=False, output="", error=f"Cannot read file: {exc}")
 
@@ -152,18 +150,13 @@ class EditTool(Tool):
         new_content = original.replace(old_text, new_text, 1)
 
         try:
-            await asyncio.to_thread(
-                file_path.write_text, new_content, encoding="utf-8"
-            )
+            await asyncio.to_thread(file_path.write_text, new_content, encoding="utf-8")
         except OSError as exc:
             return ToolResult(success=False, output="", error=f"Cannot write file: {exc}")
 
         old_lines = old_text.count("\n") + 1
         new_lines = new_text.count("\n") + 1
-        summary = (
-            f"✓ Edited '{file_path}'\n"
-            f"  Lines changed: {old_lines} → {new_lines}"
-        )
+        summary = f"✓ Edited '{file_path}'\n  Lines changed: {old_lines} → {new_lines}"
 
         return ToolResult(
             success=True,

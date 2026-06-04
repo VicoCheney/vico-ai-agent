@@ -18,6 +18,7 @@ from dataclasses import dataclass
 @dataclass
 class ModelInfo:
     """Static metadata about a specific model."""
+
     name: str
     display_name: str
     max_context_tokens: int
@@ -81,7 +82,7 @@ MIMO_MODELS: dict[str, ModelInfo] = {
         display_name="MiMo V2.5",
         max_context_tokens=1_000_000,
         max_output_tokens=131_072,
-        supports_vision=True,   # Omni: supports image / audio / video input
+        supports_vision=True,  # Omni: supports image / audio / video input
         supports_reasoning=True,
     ),
 }
