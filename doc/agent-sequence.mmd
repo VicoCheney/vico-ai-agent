@@ -1,0 +1,60 @@
+---
+title: "Vico Agent — 决策与执行时序"
+---
+sequenceDiagram
+    autonumber
+
+    actor U as 👤 用户
+    participant AL as AgentLoop
+    participant DT as 复杂度检测
+    participant PL as Planner LLM
+    participant CTX as 上下文 (ContextManager)
+    participant EL as Executor LLM
+    participant TK as 工具引擎 (asyncio.gather)
+    participant UI as 终端渲染器
+
+    U->>AL: run("给电脑做体检")
+    AL->>CTX: add_user_message(...)
+    AL->>DT: _is_complex_task("给电脑做体检")
+    DT-->>AL: True (命中关键词 "体检")
+
+    Note over AL,PL: ── Phase 1：规划阶段 ──
+
+    AL->>PL: stream(LLMRequest, tools=None)
+    Note right of PL: 无工具权限<br/>max_tokens=2048
+    PL-->>UI: ReasoningChunk → on_thinking()
+    PL-->>AL: TextChunk → plan 文本
+    AL->>UI: on_plan(plan_text) → 渲染 Plan 面板
+    AL->>CTX: add_assistant_message(plan_summary)
+
+    Note over AL,TK: ── Phase 2：执行循环（Turn 1）──
+
+    AL->>EL: stream(LLMRequest, tools=tool_defs)
+    Note right of EL: 携带 plan_summary<br/>批量工具调用 Prompt
+    EL-->>UI: ReasoningChunk → on_thinking()
+    EL-->>AL: ToolCallChunk × 6 (并行批次)
+    AL->>UI: on_tool_call() × 6 → 显示 spinner
+
+    AL->>TK: asyncio.gather(execute × 6)
+    Note right of TK: bash: sw_vers<br/>bash: sysctl ...<br/>bash: df -h<br/>bash: netstat ...<br/>bash: ifconfig ...<br/>bash: pmset -g batt
+    TK-->>AL: ToolResult × 6
+    AL->>UI: on_tool_result() × 6 → 更新状态行
+    AL->>CTX: add_tool_result() × 6
+
+    Note over AL,TK: ── Phase 2：执行循环（Turn 2）──
+
+    AL->>EL: stream(LLMRequest, tools=tool_defs)
+    EL-->>AL: ToolCallChunk × 3 (下一批次)
+    AL->>TK: asyncio.gather(execute × 3)
+    Note right of TK: bash: 防火墙状态<br/>bash: 系统日志<br/>bash: 启动项检查
+    TK-->>AL: ToolResult × 3
+    AL->>CTX: add_tool_result() × 3
+
+    Note over AL,EL: ── Phase 2：最终输出（Turn 3）──
+
+    AL->>EL: stream(LLMRequest, tools=tool_defs)
+    EL-->>AL: TextChunk → 最终报告
+    EL-->>AL: DoneChunk (无工具调用)
+    AL->>UI: on_text() + flush() → 渲染 Markdown 报告
+
+    AL-->>U: 体检完成 ✅

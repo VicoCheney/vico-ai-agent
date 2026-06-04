@@ -1,17 +1,31 @@
 """
 Agent Loop — The core "think → act → observe" engine
+
+Execution model
+───────────────
+For complex or multi-step tasks an *upfront planning phase* is inserted
+before the first tool-execution turn.  The planner sees the user's message
+and the available tools, but receives NO tool definitions — it can only
+produce a structured <plan> block (plain text).  The plan is injected into
+the conversation as a system note so the executor can immediately batch
+all independent tool calls in subsequent turns.
+
+This reduces the number of LLM round-trips for long tasks from O(N) to
+closer to O(log N) by encouraging the model to parallelise independent work.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from vico.core.context_manager import ContextManager
 from vico.core.permission_controller import PermissionController
-from vico.core.system_prompt import build_system_prompt
+from vico.core.system_prompt import build_planner_prompt, build_system_prompt
 from vico.core.types import (
     LLM,
     AgentConfig,
@@ -34,6 +48,7 @@ OnToolResultCallback = Callable[[ToolCall, ToolResult], None]
 OnErrorCallback = Callable[[Exception], None]
 OnDoneCallback = Callable[[int, int], None]  # prompt_tokens, completion_tokens
 OnLoopCallback = Callable[[int], None]
+OnPlanCallback = Callable[[str], None]  # plan text produced by the planner
 ApprovalCallback = Callable[[ToolCall], Coroutine[Any, Any, Literal["approve", "approve_always", "deny"]]]
 
 
@@ -48,6 +63,7 @@ class AgentCallbacks:
     on_error: OnErrorCallback | None = None
     on_done: OnDoneCallback | None = None
     on_loop: OnLoopCallback | None = None
+    on_plan: OnPlanCallback | None = None
     request_approval: ApprovalCallback | None = None
 
 
@@ -70,9 +86,12 @@ class AgentLoop:
         self._config = config
         self._callbacks = callbacks
         self._system_prompt = build_system_prompt(config.cwd)
+        self._planner_prompt = build_planner_prompt(config.cwd)
         self._state: AgentState = "idle"
         self._cancel_event = asyncio.Event()
         self._approval_lock = asyncio.Lock()
+
+    # ─── Public API ───────────────────────────────────────────────────────────
 
     @property
     def llm(self) -> LLM:
@@ -94,6 +113,80 @@ class AgentLoop:
         """Hot-swap the LLM provider at runtime."""
         self._llm = llm
 
+    # ─── Complexity Heuristic ─────────────────────────────────────────────────
+
+    def _is_complex_task(self, user_input: str) -> bool:
+        """Return True when the task likely needs an upfront plan.
+
+        Heuristics (any one is sufficient):
+        1. Word count ≥ min_words AND input looks like a real instruction
+           (not just "ls" or "hello")
+        2. At least one complexity keyword is found in the text
+        """
+        cfg = self._config.planning
+        if not cfg.enabled:
+            return False
+
+        text_lower = user_input.lower()
+
+        # Keyword match — fast path
+        for kw in cfg.complexity_keywords:
+            if kw.lower() in text_lower:
+                return True
+
+        # Length heuristic — strip punctuation for a fair word count
+        words = re.findall(r"\w+", user_input)
+        return len(words) >= cfg.min_words
+
+    # ─── Planning Phase ───────────────────────────────────────────────────────
+
+    async def _run_planning_phase(self, user_input: str) -> str | None:
+        """Call the LLM once with a planning-only prompt; return the plan text.
+
+        The planner receives NO tool definitions so it cannot call any tools —
+        it can only produce a structured <plan> block.  This gives the executor
+        a roadmap that it can follow to batch independent calls.
+        """
+        if self._cancel_event.is_set():
+            return None
+
+        plan_text = ""
+        stream = self._llm.stream(
+            LLMRequest(
+                system=self._planner_prompt,
+                messages=self._context.get_messages(),
+                tools=None,  # ← no tools — planner can only write text
+                max_tokens=2048,
+                temperature=self._config.llm.temperature,
+            )
+        )
+
+        async for chunk in stream:
+            if self._cancel_event.is_set():
+                break
+            if isinstance(chunk, TextChunk):
+                plan_text += chunk.content
+            elif isinstance(chunk, ReasoningChunk):
+                cb = self._callbacks.on_thinking
+                if cb:
+                    cb(chunk.content)
+            elif isinstance(chunk, ErrorChunk):
+                # Planning failure is non-fatal — executor continues without a plan
+                return None
+
+        plan_text = plan_text.strip()
+        if not plan_text:
+            return None
+
+        # Fire the on_plan callback so the renderer can display the plan
+        cb_plan = self._callbacks.on_plan
+        if cb_plan:
+            cb_plan(plan_text)
+
+        return plan_text
+
+    # ─── Main Run ─────────────────────────────────────────────────────────────
+
     async def run(self, user_input: str, max_iterations: int = 30) -> None:
         """Run the agent loop for one user message."""
         if self._state == "running":
@@ -106,6 +199,18 @@ class AgentLoop:
         self._context.maybe_compress(self._system_prompt)
 
         try:
+            # ── Optional upfront planning phase ──────────────────────────────
+            plan_note: str | None = None
+            if self._is_complex_task(user_input):
+                plan_note = await self._run_planning_phase(user_input)
+
+            # Inject the plan as a context note so the executor can reference it
+            if plan_note:
+                self._context.add_assistant_message(
+                    text=f"<plan_summary>\n{plan_note}\n</plan_summary>",
+                    tool_calls=None,
+                )
+
             await self._loop(max_iterations)
         except asyncio.CancelledError:
             pass
@@ -289,6 +394,7 @@ class AgentLoop:
 
         exec_ctx = ToolExecutionContext(
             cwd=self._config.cwd,
+            env=dict(os.environ),
             cancel_event=self._cancel_event,
         )
         result = await self._tool_registry.execute(tool_call.name, tool_call.input, exec_ctx)

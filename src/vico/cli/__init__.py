@@ -85,7 +85,7 @@ async def _run_selector(
 ) -> Literal["approve", "approve_always", "deny"]:
     """Display a left/right arrow-key selector and return the user's decision."""
     selected: list[int] = [0]
-    done_future: asyncio.Future[int] = asyncio.get_event_loop().create_future()
+    done_future: asyncio.Future[int] = asyncio.get_running_loop().create_future()
 
     option_labels = [label for label, _ in _APPROVAL_OPTIONS]
     n = len(option_labels)
@@ -347,6 +347,9 @@ async def repl(
 
         # ── Run the agent ─────────────────────────────────────────────────────
         renderer.reset_output_state()
+        # Show the waiting spinner immediately so there's no blank period
+        # between the user pressing Enter and the first LLM token arriving.
+        renderer.start_waiting()
         run_task: asyncio.Task[None] = asyncio.create_task(agent.run(user_input, max_iterations=30))
         aborted = False
 
@@ -372,7 +375,7 @@ async def repl(
         except asyncio.CancelledError:
             pass
         finally:
-            renderer.flush()
+            await renderer.flush_async()
             if aborted:
                 renderer.print_aborted()
             _set_sigint(loop, _idle_sigint)
@@ -388,7 +391,7 @@ async def repl(
 
 
 async def async_main() -> None:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     try:
         config = load_config(cwd=os.getcwd())
@@ -432,6 +435,7 @@ async def async_main() -> None:
         on_error=renderer.on_error,
         on_done=lambda pt, ct: renderer.on_done_with_usage(pt, ct),
         on_loop=renderer.on_loop,
+        on_plan=renderer.on_plan,
         request_approval=_approval_cb,
     )
 

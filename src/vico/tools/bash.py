@@ -48,11 +48,52 @@ _INTERACTIVE_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 
+# Wrappers that defeat naive word-boundary checks (e.g. `bash -c 'sudo …'`,
+# `sh -c "sudo …"`, `eval 'sudo …'`, `$(sudo …)`, `` `sudo …` ``).  We
+# unwrap any quoted/eval'd payload inside these and re-scan the inner text.
+_WRAPPER_PATTERNS: list[re.Pattern[str]] = [
+    # bash -c "..."   /   sh -c '...'   /   zsh -c "..."
+    re.compile(r"""(?:^|[\s;&|])(?:bash|sh|zsh|dash|ksh)\s+-c\s+(['"])(.*?)\1""", re.DOTALL),
+    # eval "..."  /  eval '...'
+    re.compile(r"""\beval\s+(['"])(.*?)\1""", re.DOTALL),
+    # $(...)  command substitution
+    re.compile(r"\$\((.*?)\)", re.DOTALL),
+    # `...`   backtick substitution
+    re.compile(r"`([^`]*)`"),
+]
+
+
+def _expand_wrappers(command: str, depth: int = 0) -> str:
+    """Recursively pull the *content* out of common shell wrappers.
+
+    Returns a flat string that contains every payload, so a single regex pass
+    over the result will catch `sudo` even when it's hidden in
+    ``bash -c "sudo apt update"``.
+
+    Depth-limited to defend against pathological inputs.
+    """
+    if depth > 4:
+        return command
+    expanded = command
+    for pat in _WRAPPER_PATTERNS:
+        def _repl(m: re.Match[str]) -> str:
+            inner = m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(1)
+            return " " + _expand_wrappers(inner, depth + 1) + " "
+        expanded = pat.sub(_repl, expanded)
+    return expanded
+
+
 def _is_interactive_command(command: str) -> tuple[bool, str]:
-    """Return (True, reason) if the command is likely to block waiting for TTY input."""
+    """Return (True, reason) if the command is likely to block waiting for TTY input.
+
+    Scans both the literal command **and** any payload smuggled inside
+    ``bash -c "..."`` / ``eval`` / ``$(...)`` / backtick wrappers, so the
+    common bypass tricks no longer slip past the guardrail.
+    """
     normalized = command.strip()
+    haystack = _expand_wrappers(normalized)
     for pat in _INTERACTIVE_PATTERNS:
-        if pat.search(normalized):
+        if pat.search(haystack):
             return (
                 True,
                 f"Command contains a pattern matching '{pat.pattern}' which may require interactive TTY input (password prompt). Use a non-privileged or non-interactive alternative.",

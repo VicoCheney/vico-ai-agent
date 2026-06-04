@@ -263,10 +263,40 @@ class ToolsConfig:
 
 
 @dataclass
+class PlanningConfig:
+    """Controls the upfront planning phase that precedes tool execution."""
+
+    enabled: bool = True
+    """Whether the planning phase is active at all."""
+
+    min_words: int = 8
+    """Minimum word count in the user message to trigger planning.
+    Short messages like "hi" or "ls" skip planning."""
+
+    complexity_keywords: list[str] = field(
+        default_factory=lambda: [
+            # System diagnosis
+            "体检", "检查", "诊断", "health", "diagnos", "inspect",
+            # Multi-step tasks
+            "重构", "refactor", "migrate", "迁移", "设计", "design",
+            # Enumeration / broad scope
+            "全面", "all", "每个", "全部", "comprehensive", "complete",
+            # Debugging/investigation
+            "debug", "分析", "investigate", "排查", "troubleshoot",
+            # Setup/install
+            "setup", "install", "配置", "搭建", "部署", "deploy",
+        ]
+    )
+    """If any keyword is found in the user message, planning is triggered
+    regardless of word count."""
+
+
+@dataclass
 class AgentConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    planning: PlanningConfig = field(default_factory=PlanningConfig)
     cwd: str = field(default_factory=lambda: __import__("os").getcwd())
 
 

@@ -18,8 +18,30 @@ from vico.core.types import (
     ToolUseBlock,
 )
 
-CHARS_PER_TOKEN = 4
+CHARS_PER_TOKEN = 4         # default ratio for ASCII / Latin text
+CJK_CHARS_PER_TOKEN = 1.5   # CJK ideographs are ~1.5 chars per token
 TOOL_DEF_OVERHEAD = 3000  # estimated tokens for tool definitions
+
+
+def _count_cjk(text: str) -> int:
+    """Count CJK Unified Ideographs / Hiragana / Katakana / Hangul code points.
+
+    Counting via codepoint ranges is faster than calling unicodedata for every
+    character and is good enough for token-budget estimation.
+    """
+    n = 0
+    for ch in text:
+        cp = ord(ch)
+        if (
+            0x4E00 <= cp <= 0x9FFF        # CJK Unified Ideographs
+            or 0x3400 <= cp <= 0x4DBF     # CJK Extension A
+            or 0x20000 <= cp <= 0x2A6DF   # CJK Extension B
+            or 0x3040 <= cp <= 0x30FF     # Hiragana + Katakana
+            or 0xAC00 <= cp <= 0xD7AF     # Hangul Syllables
+            or 0xFF00 <= cp <= 0xFFEF     # Full-width forms
+        ):
+            n += 1
+    return n
 
 
 @dataclass
@@ -115,7 +137,18 @@ class ContextManager:
     # ─── Token Estimation ─────────────────────────────────────────────
 
     def estimate_tokens(self, text: str) -> int:
-        return max(1, len(text) // CHARS_PER_TOKEN)
+        """Estimate token count, accounting for CJK characters.
+
+        Pure ASCII is ~4 chars/token; CJK is ~1.5 chars/token.  We split the
+        text into CJK vs non-CJK budgets so a mostly-Chinese conversation
+        won't blow past the compression threshold undetected.
+        """
+        if not text:
+            return 1
+        cjk = _count_cjk(text)
+        other = len(text) - cjk
+        est = int(cjk / CJK_CHARS_PER_TOKEN) + (other // CHARS_PER_TOKEN)
+        return max(1, est)
 
     def estimate_message_tokens(self, msg: Message) -> int:
         if isinstance(msg.content, str):

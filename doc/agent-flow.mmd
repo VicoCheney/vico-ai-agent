@@ -1,0 +1,59 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#e8f4fd', 'primaryTextColor': '#1a1a2e', 'primaryBorderColor': '#2196f3', 'lineColor': '#546e7a', 'secondaryColor': '#f3e5f5', 'tertiaryColor': '#e8f5e9'}}}%%
+
+flowchart TD
+    U(["👤 用户输入"])
+
+    subgraph DETECT ["Phase 0 — 复杂度检测 _is_complex_task()"]
+        KW{"关键词命中?\n体检/重构/部署/debug…"}
+        WC{"词数 ≥ 阈值?\n默认 8 词"}
+    end
+
+    subgraph PLAN ["Phase 1 — 规划阶段 _run_planning_phase()"]
+        direction TB
+        PL["🤖 Planner LLM\n• tools = None 无工具权限\n• max_tokens = 2048\n• 专用 Planner Prompt"]
+        PB["📋 Plan Block\n[batch] bash+bash+bash\n[seq]   read → edit\n[batch] bash+bash"]
+        PI["注入 plan_summary\n到对话上下文"]
+        PR["📺 渲染 Plan 面板\non_plan 回调"]
+    end
+
+    subgraph EXEC ["Phase 2 — 执行循环 _loop()"]
+        direction TB
+        EL["🤖 Executor LLM\n• 完整工具定义\n• 携带 plan_summary 上下文\n• 批量工具调用 Prompt 规范"]
+        TC{"输出了\n工具调用?"}
+        AP{"任意工具\n需要审批?"}
+        SEQ["🔒 串行执行\n逐个弹确认框"]
+        PAR["⚡ asyncio.gather\n并发执行所有工具\nreturn_exceptions=True"]
+        TR["收集工具结果\n追加到上下文"]
+        MORE{"还有更多\n工具调用?"}
+        DONE["✅ 输出最终回复"]
+    end
+
+    U --> KW
+    KW -- "命中" --> PL
+    KW -- "未命中" --> WC
+    WC -- "是 (复杂)" --> PL
+    WC -- "否 (简单)" --> EL
+
+    PL --> PB
+    PB --> PI
+    PB --> PR
+    PI --> EL
+
+    EL --> TC
+    TC -- "无工具调用" --> DONE
+    TC -- "有工具调用" --> AP
+    AP -- "是 (高风险)" --> SEQ
+    AP -- "否 (低风险)" --> PAR
+    SEQ --> TR
+    PAR --> TR
+    TR --> MORE
+    MORE -- "是" --> EL
+    MORE -- "否" --> DONE
+
+    style U fill:#fff9c4,stroke:#f9a825,color:#1a1a2e
+    style PL fill:#f3e5f5,stroke:#9c27b0,color:#1a1a2e
+    style EL fill:#e3f2fd,stroke:#1565c0,color:#1a1a2e
+    style PAR fill:#e8f5e9,stroke:#2e7d32,color:#1a1a2e
+    style SEQ fill:#fff3e0,stroke:#e65100,color:#1a1a2e
+    style DONE fill:#e8f5e9,stroke:#2e7d32,color:#1a1a2e
+    style PB fill:#fce4ec,stroke:#c62828,color:#1a1a2e

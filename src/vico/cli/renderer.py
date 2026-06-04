@@ -10,6 +10,7 @@ import sys
 import time
 import unicodedata
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from rich.console import Console
 from rich.live import Live
@@ -133,6 +134,275 @@ def _pad_to_width(s: str, target_cols: int) -> str:
     if current >= target_cols:
         return s
     return s + " " * (target_cols - current)
+
+
+def _strip_internal_tags(s: str) -> str:
+    """Remove planner/internal XML-ish tags that should never reach the user."""
+    # Paired XML-like scaffold blocks.
+    for tag in ("plan_summary", "plan", "thinking", "tool_invocation",
+                "tool_call", "function_call", "invoke"):
+        out_pattern = rf"<{tag}\b[^>]*>[\s\S]*?</{tag}>"
+        s = re.sub(out_pattern, "", s)
+    # Self-closing / never-closed fake-invocation tags on their own line.
+    s = re.sub(
+        r"<(?:tool_invocation|tool_call|function_call|invoke)\b[^>]*/?>",
+        "",
+        s,
+    )
+    # Collapse 3+ consecutive newlines that the removal may have left behind.
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip("\n")
+
+
+# ─── Plan parsing (used by on_plan to render the folded-cards panel) ────────
+
+
+@dataclass
+class _PlanStep:
+    """One row in the folded-cards Plan panel."""
+
+    mode: str  # "batch" | "seq" | ""
+    purpose: str
+    icon: str
+    cmd_count: int
+
+
+@dataclass
+class _ParsedPlan:
+    goal: str
+    steps: list  # list[_PlanStep]
+    safety: str
+
+
+# Tool-type → icon.  Generic, domain-agnostic: based only on which tool the
+# step calls (bash / read / edit / write / search), NOT on what the command
+# happens to do.  Keeps the Plan panel useful across every kind of task.
+_TOOL_ICONS: dict[str, str] = {
+    "bash": "⚡",
+    "read": "📖",
+    "edit": "✏\ufe0f",
+    "write": "📝",
+    "search": "🔍",
+    "grep": "🔍",
+}
+_DEFAULT_TOOL_ICON = "•"
+
+
+def _icon_for_tools(tool_names: list[str]) -> str:
+    """Pick an icon based on the (set of) tools the step invokes.
+
+    If the step batches several tool kinds, prefer the most "action-y" one
+    (write > edit > bash > search > read).  Pure metadata steps with no
+    recognised tool fall back to a bullet.
+    """
+    if not tool_names:
+        return _DEFAULT_TOOL_ICON
+    priority = ["write", "edit", "bash", "search", "grep", "read"]
+    for p in priority:
+        if p in tool_names:
+            return _TOOL_ICONS[p]
+    return _DEFAULT_TOOL_ICON
+
+
+_TOOL_KEYWORD_RE = re.compile(r"\b(bash|read|edit|write|search|grep)\s*:", re.I)
+
+
+def _extract_tools(body: str) -> list[str]:
+    """Return a de-duplicated, lower-cased list of tool names found in body."""
+    seen: list[str] = []
+    for m in _TOOL_KEYWORD_RE.finditer(body):
+        name = m.group(1).lower()
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def _step_purpose(body: str) -> str:
+    """Distil a single plan step line into a short purpose string.
+
+    Generic, domain-agnostic strategy (no keyword tables):
+      1. ``purpose: <text>`` field, if the planner emitted one (preferred).
+      2. Trailing ``# comment`` on the step line (planner often puts intent there).
+      3. First command segment, stripped of mode/tool prefix and truncated.
+    """
+    # 1. Explicit purpose field
+    m = re.search(r"purpose\s*[:：]\s*([^|#\n]+)", body, flags=re.I)
+    if m:
+        return m.group(1).strip().rstrip(".。")
+
+    # 2. Trailing # comment
+    m = re.search(r"#\s*([^#\n]+?)\s*$", body)
+    if m:
+        return m.group(1).strip().rstrip(".。")
+
+    # 3. Fallback: first segment of the command itself.
+    cleaned = re.sub(r"^\s*\[(batch|seq)\]\s*", "", body, flags=re.I)
+    cleaned = re.sub(r"^\s*(bash|read|edit|write|search|grep)\s*:\s*", "",
+                     cleaned, flags=re.I)
+    # Cut at the first "+" or "→" so we don't dump the whole batch.
+    cleaned = re.split(r"\s\+\s|\s+→\s+|\s+->\s+", cleaned, maxsplit=1)[0].strip()
+    # Display width truncation — use existing helper so emoji / CJK are safe.
+    if _wcslen(cleaned) > 70:
+        cleaned = _truncate_by_width(cleaned, 70)
+    return cleaned or "(no description)"
+
+
+def _parse_plan(plan_text: str) -> _ParsedPlan:
+    """Best-effort parser for the planner's <plan>...</plan> output."""
+    text = plan_text.strip()
+    # Strip outer <plan> / </plan> if present.
+    text = re.sub(r"^\s*<plan[^>]*>\s*", "", text, flags=re.I)
+    text = re.sub(r"\s*</plan>\s*$", "", text, flags=re.I)
+
+    goal = ""
+    safety = ""
+    steps: list[_PlanStep] = []
+
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    i = 0
+    in_steps = False
+    while i < len(lines):
+        ln = lines[i]
+        stripped = ln.strip()
+        if not stripped:
+            i += 1
+            continue
+
+        # Goal
+        m = re.match(r"^Goal\s*:\s*(.+)$", stripped, flags=re.I)
+        if m:
+            goal = m.group(1).strip()
+            i += 1
+            continue
+
+        # Safety
+        m = re.match(r"^Safety\s*:\s*(.+)$", stripped, flags=re.I)
+        if m:
+            safety = m.group(1).strip()
+            i += 1
+            continue
+
+        if re.match(r"^Steps\s*:?\s*$", stripped, flags=re.I):
+            in_steps = True
+            i += 1
+            continue
+
+        # Step row — accept "1.", "1)", "①" etc.
+        m = re.match(r"^\s*(?:\d+[.\)]|[\u2460-\u2473])\s*(.*)$", ln)
+        if m and (in_steps or steps or "[batch]" in ln or "[seq]" in ln):
+            # Collect continuation lines (indented) into the same step.
+            body = m.group(1)
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j]
+                if not nxt.strip():
+                    break
+                if re.match(r"^\s*(?:\d+[.\)]|[\u2460-\u2473])\s+", nxt):
+                    break
+                if re.match(r"^(Goal|Steps|Safety)\s*:", nxt.strip(), flags=re.I):
+                    break
+                if nxt.startswith(" ") or nxt.startswith("\t"):
+                    body += " " + nxt.strip()
+                    j += 1
+                else:
+                    break
+            mode_m = re.search(r"\[(batch|seq)\]", body, flags=re.I)
+            mode = mode_m.group(1).lower() if mode_m else ""
+            # Count "+" separators (batch) or "→" separators (seq) as command count.
+            seg = re.sub(r"^\s*\[(batch|seq)\]\s*", "", body, flags=re.I)
+            count = len(re.split(r"\s\+\s|\s+→\s+|\s+->\s+", seg))
+            count = max(1, count)
+            purpose = _step_purpose(body)
+            icon = _icon_for_tools(_extract_tools(body))
+            steps.append(_PlanStep(mode=mode, purpose=purpose, icon=icon, cmd_count=count))
+            i = j
+            continue
+
+        i += 1
+
+    return _ParsedPlan(goal=goal, steps=steps, safety=safety)
+
+
+def _terminal_width() -> int:
+    """Return current terminal width (columns), default 100."""
+    import shutil
+
+    return shutil.get_terminal_size(fallback=(100, 24)).columns
+
+
+class _TypewriterTracker:
+    """Track how many physical terminal rows the typewriter output has occupied.
+
+    Unlike a naive per-chunk line counter, this class maintains running state
+    across chunks so that line-wrapping is computed correctly when a single
+    logical line is split across many small streaming chunks.
+
+    Models *deferred-wrap* terminals (xterm/iTerm2/Terminal.app): writing
+    exactly term_w characters leaves the cursor at the last column WITHOUT
+    advancing to the next row.  Only the (term_w+1)ˢᵗ character causes a wrap.
+
+    Usage::
+        tracker = _TypewriterTracker(term_w)
+        for chunk in stream:
+            tracker.feed(chunk)
+        # rows above the cursor that belong to the typewriter zone:
+        rows = tracker.rows_above
+    """
+
+    def __init__(self, term_w: int) -> None:
+        self._term_w = max(1, term_w)
+        # Column offset of the cursor on the current physical row (0-based).
+        self._col: int = 0
+        # Number of FULLY COMPLETED rows above the cursor's current row
+        # (each \n or wrap event increments this).
+        self._completed_rows: int = 0
+
+    def feed(self, text: str) -> None:
+        """Ingest a raw text chunk (may contain newlines and ANSI escapes)."""
+        if not text:
+            return
+        # Strip ANSI so we measure only printable column widths.
+        plain = re.sub(r"\033\[[0-9;]*[mK]", "", text)
+        for ch in plain:
+            if ch == "\n":
+                self._completed_rows += 1
+                self._col = 0
+                continue
+            if ch == "\r":
+                self._col = 0
+                continue
+            cw = _char_width(ch)
+            if cw == 0:
+                continue
+            # Deferred wrap: only wrap when the NEW char would EXCEED term_w.
+            # Writing up to and including column term_w leaves the cursor at
+            # the boundary; the next printable char moves to the next row.
+            if self._col + cw > self._term_w:
+                self._completed_rows += 1
+                self._col = cw
+            else:
+                self._col += cw
+
+    @property
+    def rows_above(self) -> int:
+        """Rows ABOVE the cursor that contain typewriter content.
+
+        This is the number of lines to send to ``\\033[N A`` (cursor up) in
+        order to land on the FIRST row of the typewriter zone.  After moving
+        up by this amount and emitting ``\\r``, the cursor is at column 0 of
+        the typewriter zone's first row, ready for ``\\033[J`` to erase the
+        whole zone before re-rendering with rich.Markdown.
+        """
+        return self._completed_rows
+
+    @property
+    def lines(self) -> int:
+        """Total physical rows the typewriter content currently occupies.
+
+        Always at least 1 (cursor sits on a row).  Provided for diagnostics;
+        production code should use ``rows_above`` for cursor positioning.
+        """
+        return self._completed_rows + 1
 
 
 # ─── Rich style constants ──────────────────────────────────────────────────────
@@ -414,6 +684,11 @@ class TerminalRenderer:
     Purely presentational.
     TTY: spinner + in-place overwrites for tools; rich.Live for text.
     Non-TTY: plain sequential output.
+
+    Loading states (TTY only):
+    1. waiting spinner  – from reset_output_state() until first LLM chunk arrives
+    2. thinking spinner – dynamic frame + truncated live thinking preview
+    3. typewriter text  – raw chars streamed live; re-rendered via Markdown on flush
     """
 
     def __init__(self) -> None:
@@ -431,15 +706,24 @@ class TerminalRenderer:
         self._last_prompt_tokens: int = 0
         self._last_completion_tokens: int = 0
 
-        # text streaming: buffer all chunks, render once via rich.Markdown at end
+        # text streaming: buffer all chunks; typewriter-print live,
+        # then re-render via rich.Markdown at the end.
         self._text_buf: list[str] = []
         self._streaming_text: bool = False
         self._live: Live | None = None
+        # Tracker for physical rows occupied by typewriter output.
+        # Reset at the start of each text block; used to scroll back
+        # for the final rich.Markdown re-render.
+        self._tw_tracker: _TypewriterTracker | None = None
+        self._typewriter_lines: int = 0  # snapshot taken at finalize time
 
         # batch tool tracking  id → (index, name, param)
         self._batch: dict[str, tuple[int, str, str]] = {}
         self._batch_size = 0
         self._done_ids: set[str] = set()
+        # Tracks in-flight _overwrite_async tasks so flush_async() can await
+        # them before scrolling the terminal (fixes last-tool spinner freeze).
+        self._overwrite_tasks: list[asyncio.Task] = []  # type: ignore[type-arg]
 
         self._render_lock: asyncio.Lock = asyncio.Lock()
         self._spinner_task: asyncio.Task | None = None  # type: ignore[type-arg]
@@ -447,6 +731,22 @@ class TerminalRenderer:
         self._perm_box_line_count: int = 0
         self._perm_box_tool_name: str = ""
         self._perm_box_param: str = ""
+
+        # ── Waiting spinner (between user submit and first LLM chunk) ──────
+        self._waiting_task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._waiting_start: float = 0.0
+        # True while the waiting spinner is occupying a line (so we know to
+        # erase it before printing any other content).
+        self._waiting_active: bool = False
+
+        # ── Generating spinner (buffering final response, before rich render) ─
+        self._generating_task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._generating_start: float = 0.0
+        self._generating_active: bool = False
+
+        # ── Thinking spinner (replaces static "💭 Thinking..." line) ────────
+        self._thinking_spinner_task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._thinking_start: float = 0.0
 
         # Optional callback: (ToolCall) -> bool — True means auto-approved (no dialog)
         # Set by the caller via set_permissions_checker().
@@ -496,29 +796,127 @@ class TerminalRenderer:
         self._text_buf.clear()
         self._streaming_text = False
         self._live = None
+        self._tw_tracker = None
+        self._typewriter_lines = 0
         self._batch.clear()
         self._done_ids.clear()
         self._batch_size = 0
+        self._overwrite_tasks.clear()
         self._turn_start_time = time.monotonic()
         self._last_prompt_tokens = 0
         self._last_completion_tokens = 0
+        self._generating_active = False
+        self._generating_task = None
+
+    # ── Waiting spinner ─────────────────────────────────────────────────────
+
+    def start_waiting(self) -> None:
+        """Start the 'Waiting for response...' spinner immediately after user submit.
+
+        This covers the latency gap between the user pressing Enter and the LLM
+        producing its first token.  Call this right after reset_output_state().
+        Only active in TTY mode.
+        """
+        if not _is_tty():
+            return
+        self._waiting_start = time.monotonic()
+        self._waiting_active = True
+        try:
+            loop = asyncio.get_running_loop()
+            self._waiting_task = loop.create_task(self._waiting_spin_loop())
+        except RuntimeError:
+            # No running event loop (e.g. sync context or test); skip.
+            self._waiting_active = False
+
+    def _stop_waiting(self) -> None:
+        """Stop the waiting spinner and erase its line.
+
+        Safe to call multiple times; idempotent after the first call.
+        """
+        if self._waiting_task and not self._waiting_task.done():
+            self._waiting_task.cancel()
+        self._waiting_task = None
+        if self._waiting_active:
+            # Erase the spinner line so subsequent output starts cleanly.
+            sys.stdout.write(f"\r{_CLEAR_LINE}")
+            sys.stdout.flush()
+            self._waiting_active = False
+
+    async def _waiting_spin_loop(self) -> None:
+        """Animate the waiting-for-LLM spinner until cancelled."""
+        # Phase labels keyed by elapsed seconds threshold
+        _phases: list[tuple[float, str]] = [
+            (0.0, "Connecting"),
+            (2.0, "Waiting for response"),
+            (6.0, "Still thinking"),
+            (15.0, "Taking a while"),
+        ]
+        try:
+            while True:
+                await asyncio.sleep(0.08)
+                self._frame_idx += 1
+                frame = _FRAMES[self._frame_idx % len(_FRAMES)]
+                elapsed = time.monotonic() - self._waiting_start
+                label = _phases[0][1]
+                for threshold, phase_label in _phases:
+                    if elapsed >= threshold:
+                        label = phase_label
+                line = (
+                    f"\r{_CLEAR_LINE}"
+                    f"{_DIM}{frame} {label}...  {elapsed:.1f}s{_RESET}"
+                )
+                sys.stdout.write(line)
+                sys.stdout.flush()
+        except asyncio.CancelledError:
+            pass
 
     # ── Agent callbacks ─────────────────────────────────────────────────────
 
     def on_thinking(self, content: str) -> None:
-        """Accumulate thinking text; show compact summary when done."""
+        """Accumulate thinking text; show animated spinner + live preview while thinking."""
         self._ensure_agent_label()
         self._stop_spinner()
+        # Stop the generating spinner first so it doesn't bleed across into the
+        # thinking block (otherwise the dim "⠹ Generating response..." line
+        # stays on screen above the thinking header).
+        self._stop_generating()
         self._stop_live()
         if not self._thinking_active:
             self._thinking_active = True
+            self._thinking_start = time.monotonic()
+            # Always print a blank line before the thinking block
+            # (clear any previous content on the current line first)
+            _write(f"\r{_CLEAR_LINE}")
+            _write("\n")
             if self._had_tool_output:
-                _write("\n")
                 self._had_tool_output = False
-            _write(f"{_DIM}💭 Thinking...{_RESET}\n")
+            # Print the two-line thinking header that the spinner will overwrite:
+            # Line 1: "🧠 Thingking (0.0s)"
+            # Line 2: "⠋⠋ <snippet>…"
+            _write(f"{_DIM}🧠 Thinking (0.0s){_RESET}\n")
+            _write(f"{_DIM}⠋⠋ …{_RESET}\n")
+            # Start the thinking spinner task (animates the two lines above in-place)
+            if _is_tty() and self._thinking_spinner_task is None:
+                try:
+                    loop = asyncio.get_running_loop()
+                    self._thinking_spinner_task = loop.create_task(self._thinking_spin_loop())
+                except RuntimeError:
+                    pass
         self._thinking_buf.append(content)
 
     def on_text(self, content: str) -> None:
+        """Buffer text content; rendered once via rich.Markdown at flush time.
+
+        We deliberately do NOT typewriter-stream text chunks to the terminal
+        because doing so requires a precise cursor scroll-back at finalize time
+        (\033[N A \033[J) to overwrite the raw text with formatted Markdown.
+        That cursor math races with concurrent _overwrite_async() (tool result
+        row updates) and depends on terminal-specific deferred-wrap behaviour
+        — both of which have caused content to be erased.  The waiting and
+        thinking spinners already cover the user-perceived latency before the
+        first text token; flushing the entire response at once is reliable and
+        produces correct Markdown formatting every time.
+        """
         self._ensure_agent_label()
         if content:
             self._end_thinking_compact()
@@ -531,9 +929,20 @@ class TerminalRenderer:
 
         if content:
             self._streaming_text = True
+            # Start generating spinner on the very first real text chunk:
+            # the response is fully buffered and won't be rendered until
+            # flush_async(); this spinner bridges that silent wait.
+            if not self._generating_active:
+                self._start_generating()
 
     def on_tool_call(self, tool_call: ToolCall) -> None:
         self._ensure_agent_label()
+        # Stop the generating spinner BEFORE flushing any buffered text so the
+        # spinner line is erased atomically and the Markdown render starts on
+        # a clean column-0 line.  Otherwise the spinner frame collides with
+        # the final Markdown text on the same line (seen as
+        # "⠹ Almost there...  121.0s<plan_summary>..." in case logs).
+        self._stop_generating()
         self._stop_live(finalize=True)
         self._end_thinking_compact()
 
@@ -581,16 +990,82 @@ class TerminalRenderer:
             return
 
         # Auto-approved path: overwrite the spinner row in-place.
+        # IMPORTANT: do this SYNCHRONOUSLY rather than scheduling an
+        # _overwrite_async task.  Python asyncio is single-threaded, so a
+        # sync stdout write here is atomic w.r.t. the spin loop (which can
+        # only run between awaits).  Deferring the overwrite via create_task
+        # used to race with the very next sync callback (on_thinking /
+        # on_tool_call) that wrote NEW content to the terminal before the
+        # overwrite task got its chance to run — leaving the last tool row
+        # frozen on its last spinner frame (e.g. "⠴ bash  system_profiler ...").
         done_line = _fmt_done(result.success, name, param, stat)
         if _is_tty():
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._overwrite_async(idx, done_line))
-            except RuntimeError:
-                _write(done_line + "\n")
+            # Stop the spin loop FIRST so it cannot redraw a stale spinner
+            # frame over our just-written done line.  It will be restarted
+            # by the next on_tool_call() if more tools follow.
+            self._stop_spinner()
+            self._overwrite_sync(idx, done_line)
         else:
             _write(done_line + "\n")
         self._had_tool_output = True
+
+    # ── Generating spinner (buffering final Markdown, before rich render) ───
+
+    def _start_generating(self) -> None:
+        """Start the 'Generating response...' spinner shown while buffering text.
+
+        The spinner occupies a single line and is erased atomically by
+        _stop_generating() before the rich.Markdown block is rendered.
+        Only active in TTY mode.
+        """
+        if not _is_tty():
+            return
+        self._generating_start = time.monotonic()
+        self._generating_active = True
+        try:
+            loop = asyncio.get_running_loop()
+            self._generating_task = loop.create_task(self._generating_spin_loop())
+        except RuntimeError:
+            self._generating_active = False
+
+    def _stop_generating(self) -> None:
+        """Stop the generating spinner and erase its line.
+
+        Safe to call multiple times; idempotent after the first call.
+        """
+        if self._generating_task and not self._generating_task.done():
+            self._generating_task.cancel()
+        self._generating_task = None
+        if self._generating_active:
+            sys.stdout.write(f"\r{_CLEAR_LINE}")
+            sys.stdout.flush()
+            self._generating_active = False
+
+    async def _generating_spin_loop(self) -> None:
+        """Animate the generating-response spinner until cancelled."""
+        _phases: list[tuple[float, str]] = [
+            (0.0, "Generating response"),
+            (5.0, "Still generating"),
+            (12.0, "Almost there"),
+        ]
+        try:
+            while True:
+                await asyncio.sleep(0.08)
+                self._frame_idx += 1
+                frame = _FRAMES[self._frame_idx % len(_FRAMES)]
+                elapsed = time.monotonic() - self._generating_start
+                label = _phases[0][1]
+                for threshold, phase_label in _phases:
+                    if elapsed >= threshold:
+                        label = phase_label
+                line = (
+                    f"\r{_CLEAR_LINE}"
+                    f"{_DIM}{frame} {label}...  {elapsed:.1f}s{_RESET}"
+                )
+                sys.stdout.write(line)
+                sys.stdout.flush()
+        except asyncio.CancelledError:
+            pass
 
     # ── Token tracking ──────────────────────────────────────────────────────
 
@@ -598,7 +1073,7 @@ class TerminalRenderer:
         self._last_prompt_tokens = prompt_tokens
         self._last_completion_tokens = completion_tokens
 
-    # ── Spinner ─────────────────────────────────────────────────────────────
+    # ── Tool spinner ─────────────────────────────────────────────────────────
 
     async def _spin_loop(self) -> None:
         """Animate the spinner for all pending tool rows.
@@ -663,11 +1138,52 @@ class TerminalRenderer:
         finally:
             self._spinner_task = None
 
+    def _overwrite_sync(self, idx: int, new_line: str) -> None:
+        """Synchronously overwrite a specific tool row in-place.
+
+        Safe because Python's asyncio is single-threaded: between the moment
+        this function starts writing and the moment it returns, no other
+        coroutine (including the spinner loop) can interleave its own writes.
+
+        Cursor arithmetic mirrors the former _overwrite_async:
+          - cursor sits one line below the last tool row (logical row _batch_size)
+          - move up (_batch_size - idx) lines to reach row `idx`
+          - write the done line followed by \n (advances cursor 1 row)
+          - move down (_batch_size - idx - 1) lines back to the bottom
+        """
+        lines_up = self._batch_size - idx
+        if lines_up <= 0:
+            sys.stdout.write(f"\r{_CLEAR_LINE}{new_line}\n")
+        elif lines_up == 1:
+            # idx is the immediately-previous row; just go up one and rewrite,
+            # then \n brings cursor back to the bottom — no extra down move.
+            sys.stdout.write(f"\033[1A\r{_CLEAR_LINE}{new_line}\n")
+        else:
+            sys.stdout.write(
+                f"\033[{lines_up}A\r{_CLEAR_LINE}{new_line}\n\033[{lines_up - 1}B"
+            )
+        sys.stdout.flush()
+
     async def _overwrite_async(self, idx: int, new_line: str) -> None:
-        """Overwrite a specific tool row in-place (used when tool completes)."""
+        """Overwrite a specific tool row in-place (used when tool completes).
+
+        Acquires the render lock so that the concurrent _spin_loop never
+        writes a stale spinner frame AFTER we have placed the final done line.
+        Cursor arithmetic:
+          - cursor is one line below the last tool row  (at logical row _batch_size)
+          - to reach row `idx` we move up (_batch_size - idx) lines
+          - after writing new_line we move back down (_batch_size - idx - 1) lines
+            (one less because \n already advanced us one row)
+        """
         async with self._render_lock:
             lines_up = self._batch_size - idx
-            sys.stdout.write(f"\033[{lines_up}A\r{_CLEAR_LINE}{new_line}\n\033[{lines_up - 1}B")
+            if lines_up <= 0:
+                # idx is already the last row; just overwrite in-place
+                sys.stdout.write(f"\r{_CLEAR_LINE}{new_line}")
+            else:
+                sys.stdout.write(
+                    f"\033[{lines_up}A\r{_CLEAR_LINE}{new_line}\n\033[{lines_up - 1}B"
+                )
             sys.stdout.flush()
 
     def _stop_spinner(self) -> None:
@@ -675,29 +1191,94 @@ class TerminalRenderer:
             self._spinner_task.cancel()
             self._spinner_task = None
 
+    # ── Thinking spinner ────────────────────────────────────────────────────
+
+    async def _thinking_spin_loop(self) -> None:
+        """Animate the two-line thinking indicator with live snippet and elapsed time.
+
+        Format:
+          Line 1: 🧠 Thingking (3.5s)
+          Line 2: ⠋⠋ <snippet truncated to 80% terminal width>…
+
+        The spinner overwrites the two lines printed by on_thinking() on first call.
+        When thinking ends, _end_thinking_compact() cancels this task and replaces
+        the two lines with the completed format:
+          Line 1: 🧠 Thought (3.5s)
+          Line 2: —> <snippet truncated to 80% terminal width>…
+        """
+        try:
+            while True:
+                await asyncio.sleep(0.1)
+                self._frame_idx += 1
+                frame = _FRAMES[self._frame_idx % len(_FRAMES)]
+                elapsed = time.monotonic() - self._thinking_start
+
+                # Build a live snippet from the most recent thinking content
+                raw = "".join(self._thinking_buf).replace("\n", " ").strip()
+                tw = _terminal_width()
+                # Reserve space for the prefix "⠋⠋ " (4 cols) and ellipsis
+                snippet_budget = max(20, int(tw * 0.80) - 4)
+                snippet = _truncate_by_width(raw, snippet_budget) if raw else "…"
+
+                # Rewrite both lines: move up 1 line (cursor is after line 2)
+                buf = (
+                    f"\033[2A"  # move up 2 lines to line 1
+                    f"\r{_CLEAR_LINE}"
+                    f"{_DIM}🧠 Thinking ({elapsed:.1f}s){_RESET}\n"
+                    f"{_CLEAR_LINE}"
+                    f"{_DIM}{frame}{frame} {_ITALIC}{snippet}{_RESET}\n"
+                )
+                sys.stdout.write(buf)
+                sys.stdout.flush()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._thinking_spinner_task = None
+
+    def _stop_thinking_spinner(self) -> None:
+        """Cancel the thinking spinner task (does NOT erase the line)."""
+        if self._thinking_spinner_task and not self._thinking_spinner_task.done():
+            self._thinking_spinner_task.cancel()
+        self._thinking_spinner_task = None
+
     # ── rich.Live text rendering ─────────────────────────────────────────────
 
     def _refresh_live(self) -> None:
         """No-op: kept for API compatibility."""
 
     def _stop_live(self, finalize: bool = False) -> None:
-        """Finalize a text block: render buffered content via rich.Markdown."""
+        """Finalize a text block: render the buffered content via rich.Markdown.
+
+        Text was buffered (not streamed) by on_text(), so finalize is a clean
+        single render with no scroll-back / cursor math — immune to races with
+        the concurrent tool spinner and _overwrite_async().
+        """
         if self._live is not None:
             self._live.stop()
             self._live = None
 
         if finalize and self._text_buf:
+            # Ensure the generating spinner is gone BEFORE we print Markdown,
+            # otherwise its line collides with the rendered text.
+            self._stop_generating()
             full = "".join(self._text_buf)
-            console.print(Markdown(full))
+            full = _strip_internal_tags(full)
+            if full.strip():
+                console.print(Markdown(full))
 
         if finalize:
             self._text_buf.clear()
             self._streaming_text = False
+            self._tw_tracker = None
+            self._typewriter_lines = 0
 
     # ── Lifecycle callbacks ──────────────────────────────────────────────────
 
     def on_error(self, error: Exception) -> None:
+        self._stop_waiting()
+        self._stop_thinking_spinner()
         self._stop_spinner()
+        self._stop_generating()
         self._stop_live(finalize=False)
         self._end_thinking_compact()
         console.print()
@@ -708,23 +1289,134 @@ class TerminalRenderer:
 
     def on_loop(self, iteration: int) -> None:
         self._stop_spinner()
+        # Stop the generating spinner so it does NOT carry its elapsed timer
+        # over into the next iteration (case showed "⠸ Almost there...  124.3s"
+        # at the start of iteration 2 because the old task was still running).
+        self._stop_generating()
         self._stop_live(finalize=True)
         self._batch.clear()
         self._done_ids.clear()
         self._batch_size = 0
+        self._overwrite_tasks.clear()
+
+    def on_plan(self, plan_text: str) -> None:
+        """Display the upfront plan as a folded-cards panel (Plan B).
+
+        Renders one row per step:  ① <icon> <purpose>   [batch · N cmds] ▸
+        Plus a footer with step count, command count, safety summary.
+        """
+        self._ensure_agent_label()
+        self._stop_waiting()
+        self._stop_generating()
+        self._stop_thinking_spinner()
+        self._end_thinking_compact()
+
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.text import Text as RichText
+
+        parsed = _parse_plan(plan_text)
+
+        # ── Build the body table (one row per step) ────────────────────────
+        body = Table.grid(expand=True, padding=(0, 1))
+        body.add_column(justify="left", no_wrap=True, width=4)       # ①
+        body.add_column(justify="left", no_wrap=True, width=2)       # icon
+        body.add_column(justify="left", ratio=1, overflow="fold")    # purpose
+        body.add_column(justify="right", no_wrap=True)               # badge
+        body.add_column(justify="right", no_wrap=True, width=2)      # ▸
+
+        _CIRCLED = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩",
+                    "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑱", "⑲", "⑳"]
+
+        total_cmds = 0
+        for i, step in enumerate(parsed.steps):
+            total_cmds += step.cmd_count
+            num = _CIRCLED[i] if i < len(_CIRCLED) else f"{i + 1}."
+            mode = step.mode  # "batch" | "seq" | ""
+            badge_color = "green" if mode == "batch" else "yellow" if mode == "seq" else "bright_black"
+            badge = f"[{badge_color}]\\[{mode} · {step.cmd_count} cmd{'s' if step.cmd_count != 1 else ''}][/{badge_color}]"
+            body.add_row(
+                f"[cyan]{num}[/cyan]",
+                f"{step.icon}",
+                f"[white]{step.purpose}[/white]",
+                badge,
+                "[bright_black]▸[/bright_black]",
+            )
+
+        # ── Header (Goal) + Footer (stats) ─────────────────────────────────
+        goal_line = RichText.from_markup(
+            f"[bold]Goal[/bold]  [white]{parsed.goal}[/white]"
+        ) if parsed.goal else RichText("")
+
+        safety_label = parsed.safety.strip() or "none"
+        safety_is_safe = safety_label.lower().lstrip().startswith(("none", "no risk", "read-only", "readonly", "只读")) or safety_label.lstrip().startswith("无")
+        safety_icon = "🔒" if safety_is_safe else "⚠\ufe0f "
+        safety_color = "green" if safety_is_safe else "yellow"
+
+        footer_line = RichText.from_markup(
+            f"  [bright_black]⏱  ~{max(5, total_cmds * 2)}s  ·  {safety_icon} [{safety_color}]{("safe" if safety_is_safe else _truncate_by_width(safety_label, 40))}[/{safety_color}]  ·  "
+            f"{len(parsed.steps)} steps / {total_cmds} cmds[/bright_black]"
+        )
+        # Assemble: goal → blank → body table → blank → footer
+        from rich.console import Group
+        group = Group(
+            goal_line if parsed.goal else RichText(""),
+            RichText(""),
+            body,
+            RichText(""),
+            footer_line,
+        )
+
+        # Force the panel to span the FULL terminal width.  Without an
+        # explicit width, rich sizes the panel to its inner content (the
+        # Table.grid) which can leave a gap on the right when the longest
+        # row is shorter than the terminal — visible as a missing border.
+        console.print(
+            Panel(
+                group,
+                title="[bold]📋 Plan[/bold]",
+                title_align="left",
+                border_style="cyan",
+                padding=(1, 2),
+                expand=True,
+                width=console.width,
+            )
+        )
+
+    async def flush_async(self) -> None:
+        """Async version of flush: awaits any in-flight overwrite tasks first.
+
+        Must be called instead of flush() when an event loop is running, so
+        that _overwrite_async tasks (which update spinner rows in-place) finish
+        before the final Markdown block scrolls the terminal.  Without this
+        the last tool's spinner row stays frozen on screen.
+        """
+        if self._overwrite_tasks:
+            # Wait for all pending overwrite coroutines to complete.
+            # return_exceptions=True ensures we don't crash if one fails.
+            await asyncio.gather(*self._overwrite_tasks, return_exceptions=True)
+            self._overwrite_tasks.clear()
+        self.flush()
 
     def flush(self) -> None:
+        self._stop_waiting()
+        self._stop_thinking_spinner()
         self._stop_spinner()
+        self._stop_generating()
         self._stop_live(finalize=True)
         self._end_thinking_compact()
         self._batch.clear()
         self._done_ids.clear()
         self._batch_size = 0
+        self._overwrite_tasks.clear()
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
     def _ensure_agent_label(self) -> None:
         if not self._agent_label_printed:
+            # Stop the waiting spinner and erase its line before printing
+            # the agent label so the label starts on a clean line.
+            self._stop_waiting()
             console.print()
             label = f"🤖 Vico{self._model_label}:"
             console.print(Text(label, style=AGENT_NAME_STYLE))
@@ -732,20 +1424,42 @@ class TerminalRenderer:
             self._agent_label_printed = True
 
     def _end_thinking_compact(self) -> None:
-        """Show a one-line thinking summary capped at 75% of terminal width."""
+        """Stop the thinking spinner and replace the two-line block with the completed format.
+
+        Completed format:
+          Line 1: 🧠 Thought (3.5s)
+          Line 2: —> <snippet truncated to 80% terminal width>…
+
+        A single blank line follows the completed block to separate it from the
+        next content (tool rows or response text).
+        """
         if not self._thinking_active:
             return
         self._thinking_active = False
+        self._stop_thinking_spinner()
 
         full = "".join(self._thinking_buf).replace("\n", " ").strip()
         self._thinking_buf.clear()
-        if full:
-            import shutil
 
-            term_w = shutil.get_terminal_size(fallback=(100, 24)).columns
-            max_w = max(40, int(term_w * 0.75))
-            summary = _truncate_by_width(full, max_w)
-            _write(f"{_DIM}{_ITALIC}{summary}{_RESET}\n\n")
+        elapsed = time.monotonic() - self._thinking_start
+
+        import shutil
+        term_w = shutil.get_terminal_size(fallback=(100, 24)).columns
+        # Reserve space for the prefix "—> " (3 cols) and ellipsis
+        snippet_budget = max(20, int(term_w * 0.80) - 3)
+        summary = _truncate_by_width(full, snippet_budget) if full else "…"
+
+        # Overwrite both spinner lines with the completed two-line format,
+        # then add ONE blank line after (not two — caller must NOT add more).
+        buf = (
+            f"\033[2A"  # move up 2 lines to overwrite line 1
+            f"\r{_CLEAR_LINE}"
+            f"{_DIM}🧠 Thought ({elapsed:.1f}s){_RESET}\n"
+            f"{_CLEAR_LINE}"
+            f"{_DIM}—> {_ITALIC}{summary}{_RESET}\n"
+            f"\n"  # single blank line after the completed block
+        )
+        _write(buf)
 
     # ── Permission prompt ────────────────────────────────────────────────────
 
@@ -798,7 +1512,10 @@ class TerminalRenderer:
         console.print(Text(f"  ✗  {error}", style=f"bold {ERROR}"))
 
     def print_aborted(self) -> None:
+        self._stop_waiting()
+        self._stop_thinking_spinner()
         self._stop_spinner()
+        self._stop_generating()
         self._stop_live(finalize=False)
         self._end_thinking_compact()
         console.print()

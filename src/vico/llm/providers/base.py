@@ -209,6 +209,23 @@ class OpenAICompatibleLLM(LLM):
                 else:
                     finish_reason = choice.finish_reason
 
+        # Stream ended — flush any pending tool calls a non-compliant provider
+        # may have left dangling (no finish_reason ever arrived).
+        if pending_tool_calls:
+            for tc_data in pending_tool_calls.values():
+                try:
+                    tool_input = json.loads(tc_data["args_buffer"] or "{}")
+                except json.JSONDecodeError:
+                    tool_input = {"_raw": tc_data["args_buffer"]}
+                yield ToolCallChunk(
+                    tool_call=ToolCall(
+                        id=tc_data["id"],
+                        name=tc_data["name"],
+                        input=tool_input,
+                    )
+                )
+            pending_tool_calls.clear()
+
         # Stream ended — emit DoneChunk if finish_reason was set without a trailing chunk.
         if finish_reason is not None:
             yield DoneChunk(

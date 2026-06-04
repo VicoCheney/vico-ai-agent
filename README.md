@@ -5,14 +5,16 @@
 ## 功能特性
 
 - 🔄 **Agent Loop** — Think → Act → Observe 循环，支持多轮工具调用
-- 🔧 **4 个核心工具**：
+- 📋 **Planning Phase** — 复杂任务先做规划再执行，自动检测并批量调度独立工具调用
+- 🔧 **5 个核心工具**：
   - `read` — 读取文件内容，支持行范围
+  - `write` — 创建或覆盖文件（整文件写入，中风险，需确认）
+  - `edit` — 精确字符串替换编辑文件（中风险，需确认）
   - `bash` — 执行 Shell 命令（高风险，需确认）
   - `search` — 正则搜索代码（优先使用 ripgrep）
-  - `edit` — 精确字符串替换编辑文件（中风险，需确认）
 - 🛡️ **权限控制** — 危险操作前弹出确认框，支持"本次批准 / 本会话始终批准 / 拒绝"
 - 💭 **Thinking 展示** — 实时流式展示模型推理过程
-- 🎨 **终端 UI** — 彩色 Spinner、比例对齐的工具执行行、Markdown 渲染
+- 🎨 **终端 UI** — 彩色 Spinner、比例对齐的工具执行行、Markdown 渲染、Plan 面板
 - 🔀 **多 Provider** — 内置 MiMo (Xiaomi) 和 DeepSeek，运行时 `/model` 热切换
 
 ---
@@ -169,7 +171,45 @@ vico   # 👈 直接在桌面上启动 Vico
 uv tool uninstall vico-ai-agent
 ```
 
+## 执行策略
+
+Vico 采用 **两阶段执行模型** 以减少 LLM 调用次数：
+
+### Phase 0 — Planning（任务规划）
+
+当用户的请求满足以下任一条件时，Vico 会在执行任何工具之前先调用一次纯规划 LLM（无工具权限），产出结构化的 `<plan>` 块：
+
+- 输入包含复杂性关键词（如"体检"、"全面"、"重构"、"部署"等）
+- 输入词数达到一定阈值，看起来是一个多步任务
+
+`<plan>` 块中每个步骤标注 `[batch]`（可并行）或 `[seq]`（顺序依赖），Executor 据此在同一 LLM 轮次内批量发出多个工具调用：
+
+```
+Steps:
+  1. [batch] bash: sw_vers + bash: sysctl ... + bash: df -h + bash: vm_stat
+  2. [batch] bash: netstat ... + bash: ifconfig ...
+  3. [seq]   read: config.py  →  edit: config.py
+```
+
+### Phase 1 — Execution（批量执行）
+
+Executor 接收到规划后，一次 LLM 调用可以输出多个工具调用（已由底层 `AgentLoop` 支持并发执行），将原来 O(N) 的 LLM round-trips 降低到接近 O(log N)。
+
+### 配置
+
+Planning Phase 可通过 `.vicorc.json` 的 `planning` 字段调整：
+
+```jsonc
+"planning": {
+  "enabled": true,          // 总开关
+  "min_words": 8,           // 触发规划的最低词数
+  "complexity_keywords": [] // 自定义关键词追加（内置关键词不被覆盖）
+}
+```
+
 ---
+
+
 
 ## 交互命令
 
@@ -190,7 +230,7 @@ Vico 在执行工具前会根据风险等级决定是否需要用户确认：
 | 级别 | 工具 | 行为 |
 |------|------|------|
 | `low` | `read`, `search` | 自动执行，无需确认 |
-| `medium` | `edit` | 弹出权限确认框 |
+| `medium` | `write`, `edit` | 弹出权限确认框 |
 | `high` | `bash` | 弹出权限确认框 |
 
 权限确认框选项：
@@ -205,11 +245,11 @@ Vico 在执行工具前会根据风险等级决定是否需要用户确认：
 ```
 src/vico/
 ├── core/
-│   ├── types.py                  # 核心类型定义
-│   ├── agent_loop.py             # Agent 主循环 (Think → Act → Observe)
+│   ├── types.py                  # 核心类型定义（含 PlanningConfig）
+│   ├── agent_loop.py             # Agent 主循环：Planning → Execute → Observe
 │   ├── context_manager.py        # 上下文窗口管理 + Token 压缩
 │   ├── permission_controller.py  # 工具执行权限控制
-│   └── system_prompt.py          # 系统 Prompt 构建（含 Git 信息）
+│   └── system_prompt.py          # Executor + Planner 两套 Prompt 构建
 ├── llm/
 │   ├── llm_factory.py            # Provider 工厂（读取 .vicorc.json）
 │   ├── models.py                 # 支持的模型注册表
@@ -221,6 +261,7 @@ src/vico/
 │   ├── __init__.py               # 内置工具列表
 │   ├── registry.py               # 工具注册表 + 调度器
 │   ├── read.py                   # read 工具
+│   ├── write.py                  # write 工具（创建/覆盖整文件）
 │   ├── bash.py                   # bash 工具
 │   ├── edit.py                   # edit 工具
 │   └── search.py                 # search 工具（ripgrep / grep）
@@ -268,6 +309,11 @@ src/vico/
   "tools": {
     "auto_approve": ["low"],       // 自动批准的风险级别
     "timeout_ms": 30000            // 工具执行超时（毫秒）
+  },
+  "planning": {
+    "enabled": true,               // Planning Phase 总开关
+    "min_words": 8,                // 触发规划的最低词数
+    "complexity_keywords": []      // 自定义关键词（追加到内置列表）
   }
 }
 ```
