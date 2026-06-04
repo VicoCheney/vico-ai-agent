@@ -45,34 +45,61 @@ from dotenv import load_dotenv
 from vico.core.types import AgentConfig, ContextConfig, LLMConfig, ToolsConfig
 
 
-def _find_project_root(cwd: str | None = None) -> Path:
+def _find_config_root(cwd: str | None = None) -> Path:
     """
-    Walk upward from the given directory looking for .vicorc.json.
-    Falls back to pyproject.toml if no .vicorc.json is found.
+    Discover the Vico configuration directory.
 
-    Returns the directory containing the marker file.
+    Search order (first match wins):
+      1. Walk upward from cwd looking for .vicorc.json or pyproject.toml
+      2. Environment variable VICO_CONFIG_DIR
+      3. Global user config: ~/.config/vico/
+      4. Package source directory (for editable installs)
+      5. Fall back to cwd (or os.getcwd())
     """
     current = Path(cwd) if cwd else Path.cwd()
-    # Resolve symlinks but not via home-relative shortcuts
     current = current.resolve()
 
+    # 1. Walk up from cwd — project-specific override
     for ancestor in [current, *current.parents]:
         if (ancestor / ".vicorc.json").exists():
             return ancestor
         if (ancestor / "pyproject.toml").exists():
             return ancestor
 
-    # Nothing found — fall back to the original cwd
+    # 2. VICO_CONFIG_DIR environment variable
+    env_dir = os.environ.get("VICO_CONFIG_DIR")
+    if env_dir:
+        env_path = Path(env_dir).expanduser().resolve()
+        if (env_path / ".vicorc.json").exists():
+            return env_path
+
+    # 3. Global user config directory
+    global_config = Path.home() / ".config" / "vico"
+    if (global_config / ".vicorc.json").exists():
+        return global_config
+
+    # 4. Package source directory (works for editable installs)
+    try:
+        import vico  # type: ignore[import-untyped]
+        pkg_file = Path(vico.__file__).resolve()
+        src_dir = pkg_file.parent.parent   # src/vico/__init__.py → src/
+        project_root = src_dir.parent       # src → project root
+        if (project_root / ".vicorc.json").exists():
+            return project_root
+    except Exception:
+        pass
+
+    # 5. Nothing found — fall back to cwd
     return current
 
 
-# Discover project root *once* at import time for load_dotenv.
+# Discover config root *once* at import time for load_dotenv.
 # The explicit cwd passed to load_config() can override this per call,
 # but lookup_provider() relies on this implicit root.
-_PROJECT_ROOT = _find_project_root()
+_CONFIG_ROOT = _find_config_root()
 
-# Load .env from the discovered project root (non-fatal if missing)
-load_dotenv(dotenv_path=_PROJECT_ROOT / ".env")
+# Load .env from the discovered config root (non-fatal if missing)
+load_dotenv(dotenv_path=_CONFIG_ROOT / ".env")
 
 
 def _load_vicorc(root: Path) -> dict:
@@ -94,10 +121,18 @@ def _load_vicorc(root: Path) -> dict:
 
 
 def load_config(cwd: str | None = None) -> AgentConfig:
-    """Load and build the full agent configuration."""
-    root = _find_project_root(cwd) if cwd else _PROJECT_ROOT
-    working_dir = str(root)
-    rc = _load_vicorc(root)
+    """Load and build the full agent configuration.
+
+    Parameters
+    ----------
+    cwd : str | None
+        Working directory where the agent was launched.  The config root
+        (.vicorc.json / .env location) is discovered independently — they
+        may differ when Vico is run from outside the project directory.
+    """
+    config_root = _find_config_root(cwd) if cwd else _CONFIG_ROOT
+    working_dir = str(Path(cwd).resolve()) if cwd else os.getcwd()
+    rc = _load_vicorc(config_root)
 
     llm = _parse_llm_config(rc)
     context = _parse_context_config(rc)
@@ -111,7 +146,7 @@ def lookup_provider(provider_name: str) -> dict[str, str]:
     Look up a provider's config from .vicorc.json + .env.
     Used by /model command at runtime to resolve provider/model for switching.
     """
-    rc = _load_vicorc(_PROJECT_ROOT)
+    rc = _load_vicorc(_CONFIG_ROOT)
     providers = rc.get("providers", {})
 
     provider = providers.get(provider_name.lower())

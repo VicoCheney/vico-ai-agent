@@ -19,6 +19,7 @@ Conversation layout per turn:
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 from collections.abc import Callable
 from typing import Literal
@@ -405,7 +406,7 @@ async def async_main() -> None:
     loop = asyncio.get_event_loop()
 
     try:
-        config = load_config()
+        config = load_config(cwd=os.getcwd())
     except ValueError as exc:
         console.print(f"\n[bold red]Configuration Error:[/bold red] {exc}\n")
         raise SystemExit(1) from exc

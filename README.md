@@ -124,6 +124,29 @@ uv run vico
 
 ---
 
+### 第 6 步：（可选）全局安装
+
+完成前 5 步后，`vico` 只能在项目目录内用 `uv run vico` 启动。若想在**任意目录**下直接使用 `vico` 命令，执行全局安装：
+
+```bash
+uv tool install . --force --editable
+```
+
+之后在终端任意位置输入 `vico` 即可启动：
+
+```bash
+cd ~/Desktop
+vico   # 👈 直接在桌面上启动 Vico
+```
+
+卸载：
+
+```bash
+uv tool uninstall vico-ai-agent
+```
+
+---
+
 ## 交互命令
 
 | 命令 | 说明 |
