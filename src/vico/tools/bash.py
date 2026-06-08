@@ -76,9 +76,11 @@ def _expand_wrappers(command: str, depth: int = 0) -> str:
         return command
     expanded = command
     for pat in _WRAPPER_PATTERNS:
+
         def _repl(m: re.Match[str]) -> str:
             inner = m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(1)
             return " " + _expand_wrappers(inner, depth + 1) + " "
+
         expanded = pat.sub(_repl, expanded)
     return expanded
 
@@ -187,10 +189,7 @@ class BashTool(Tool):
                     "Use a non-privileged alternative, or ask the user to run it manually."
                 )
             else:
-                error = (
-                    f"BLOCKED: {reason} "
-                    "Use a non-interactive alternative instead."
-                )
+                error = f"BLOCKED: {reason} Use a non-interactive alternative instead."
             return ToolResult(success=False, output="", error=error)
 
         if context.cancelled:
@@ -310,7 +309,7 @@ class BashTool(Tool):
         # Wait for the process to fully exit so returncode is populated.
         try:
             await asyncio.wait_for(process.wait(), timeout=5.0)
-        except (asyncio.TimeoutError, Exception):
+        except (TimeoutError, Exception):
             _kill_process_tree(process)
 
         if context.cancelled and not timed_out:

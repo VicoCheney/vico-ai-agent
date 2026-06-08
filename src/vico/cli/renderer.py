@@ -10,7 +10,6 @@ import sys
 import time
 import unicodedata
 from collections.abc import Callable
-from dataclasses import dataclass
 
 from rich.console import Console
 from rich.live import Live
@@ -139,8 +138,7 @@ def _pad_to_width(s: str, target_cols: int) -> str:
 def _strip_internal_tags(s: str) -> str:
     """Remove planner/internal XML-ish tags that should never reach the user."""
     # Paired XML-like scaffold blocks.
-    for tag in ("plan_summary", "plan", "thinking", "tool_invocation",
-                "tool_call", "function_call", "invoke"):
+    for tag in ("plan_summary", "plan", "thinking", "tool_invocation", "tool_call", "function_call", "invoke"):
         out_pattern = rf"<{tag}\b[^>]*>[\s\S]*?</{tag}>"
         s = re.sub(out_pattern, "", s)
     # Self-closing / never-closed fake-invocation tags on their own line.
@@ -152,175 +150,6 @@ def _strip_internal_tags(s: str) -> str:
     # Collapse 3+ consecutive newlines that the removal may have left behind.
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip("\n")
-
-
-# ─── Plan parsing (used by on_plan to render the folded-cards panel) ────────
-
-
-@dataclass
-class _PlanStep:
-    """One row in the folded-cards Plan panel."""
-
-    mode: str  # "batch" | "seq" | ""
-    purpose: str
-    icon: str
-    cmd_count: int
-
-
-@dataclass
-class _ParsedPlan:
-    goal: str
-    steps: list  # list[_PlanStep]
-    safety: str
-
-
-# Tool-type → icon.  Generic, domain-agnostic: based only on which tool the
-# step calls (bash / read / edit / write / search), NOT on what the command
-# happens to do.  Keeps the Plan panel useful across every kind of task.
-_TOOL_ICONS: dict[str, str] = {
-    "bash": "⚡",
-    "read": "📖",
-    "edit": "✏\ufe0f",
-    "write": "📝",
-    "search": "🔍",
-    "grep": "🔍",
-}
-_DEFAULT_TOOL_ICON = "•"
-
-
-def _icon_for_tools(tool_names: list[str]) -> str:
-    """Pick an icon based on the (set of) tools the step invokes.
-
-    If the step batches several tool kinds, prefer the most "action-y" one
-    (write > edit > bash > search > read).  Pure metadata steps with no
-    recognised tool fall back to a bullet.
-    """
-    if not tool_names:
-        return _DEFAULT_TOOL_ICON
-    priority = ["write", "edit", "bash", "search", "grep", "read"]
-    for p in priority:
-        if p in tool_names:
-            return _TOOL_ICONS[p]
-    return _DEFAULT_TOOL_ICON
-
-
-_TOOL_KEYWORD_RE = re.compile(r"\b(bash|read|edit|write|search|grep)\s*:", re.I)
-
-
-def _extract_tools(body: str) -> list[str]:
-    """Return a de-duplicated, lower-cased list of tool names found in body."""
-    seen: list[str] = []
-    for m in _TOOL_KEYWORD_RE.finditer(body):
-        name = m.group(1).lower()
-        if name not in seen:
-            seen.append(name)
-    return seen
-
-
-def _step_purpose(body: str) -> str:
-    """Distil a single plan step line into a short purpose string.
-
-    Generic, domain-agnostic strategy (no keyword tables):
-      1. ``purpose: <text>`` field, if the planner emitted one (preferred).
-      2. Trailing ``# comment`` on the step line (planner often puts intent there).
-      3. First command segment, stripped of mode/tool prefix and truncated.
-    """
-    # 1. Explicit purpose field
-    m = re.search(r"purpose\s*[:：]\s*([^|#\n]+)", body, flags=re.I)
-    if m:
-        return m.group(1).strip().rstrip(".。")
-
-    # 2. Trailing # comment
-    m = re.search(r"#\s*([^#\n]+?)\s*$", body)
-    if m:
-        return m.group(1).strip().rstrip(".。")
-
-    # 3. Fallback: first segment of the command itself.
-    cleaned = re.sub(r"^\s*\[(batch|seq)\]\s*", "", body, flags=re.I)
-    cleaned = re.sub(r"^\s*(bash|read|edit|write|search|grep)\s*:\s*", "",
-                     cleaned, flags=re.I)
-    # Cut at the first "+" or "→" so we don't dump the whole batch.
-    cleaned = re.split(r"\s\+\s|\s+→\s+|\s+->\s+", cleaned, maxsplit=1)[0].strip()
-    # Display width truncation — use existing helper so emoji / CJK are safe.
-    if _wcslen(cleaned) > 70:
-        cleaned = _truncate_by_width(cleaned, 70)
-    return cleaned or "(no description)"
-
-
-def _parse_plan(plan_text: str) -> _ParsedPlan:
-    """Best-effort parser for the planner's <plan>...</plan> output."""
-    text = plan_text.strip()
-    # Strip outer <plan> / </plan> if present.
-    text = re.sub(r"^\s*<plan[^>]*>\s*", "", text, flags=re.I)
-    text = re.sub(r"\s*</plan>\s*$", "", text, flags=re.I)
-
-    goal = ""
-    safety = ""
-    steps: list[_PlanStep] = []
-
-    lines = [ln.rstrip() for ln in text.splitlines()]
-    i = 0
-    in_steps = False
-    while i < len(lines):
-        ln = lines[i]
-        stripped = ln.strip()
-        if not stripped:
-            i += 1
-            continue
-
-        # Goal
-        m = re.match(r"^Goal\s*:\s*(.+)$", stripped, flags=re.I)
-        if m:
-            goal = m.group(1).strip()
-            i += 1
-            continue
-
-        # Safety
-        m = re.match(r"^Safety\s*:\s*(.+)$", stripped, flags=re.I)
-        if m:
-            safety = m.group(1).strip()
-            i += 1
-            continue
-
-        if re.match(r"^Steps\s*:?\s*$", stripped, flags=re.I):
-            in_steps = True
-            i += 1
-            continue
-
-        # Step row — accept "1.", "1)", "①" etc.
-        m = re.match(r"^\s*(?:\d+[.\)]|[\u2460-\u2473])\s*(.*)$", ln)
-        if m and (in_steps or steps or "[batch]" in ln or "[seq]" in ln):
-            # Collect continuation lines (indented) into the same step.
-            body = m.group(1)
-            j = i + 1
-            while j < len(lines):
-                nxt = lines[j]
-                if not nxt.strip():
-                    break
-                if re.match(r"^\s*(?:\d+[.\)]|[\u2460-\u2473])\s+", nxt):
-                    break
-                if re.match(r"^(Goal|Steps|Safety)\s*:", nxt.strip(), flags=re.I):
-                    break
-                if nxt.startswith(" ") or nxt.startswith("\t"):
-                    body += " " + nxt.strip()
-                    j += 1
-                else:
-                    break
-            mode_m = re.search(r"\[(batch|seq)\]", body, flags=re.I)
-            mode = mode_m.group(1).lower() if mode_m else ""
-            # Count "+" separators (batch) or "→" separators (seq) as command count.
-            seg = re.sub(r"^\s*\[(batch|seq)\]\s*", "", body, flags=re.I)
-            count = len(re.split(r"\s\+\s|\s+→\s+|\s+->\s+", seg))
-            count = max(1, count)
-            purpose = _step_purpose(body)
-            icon = _icon_for_tools(_extract_tools(body))
-            steps.append(_PlanStep(mode=mode, purpose=purpose, icon=icon, cmd_count=count))
-            i = j
-            continue
-
-        i += 1
-
-    return _ParsedPlan(goal=goal, steps=steps, safety=safety)
 
 
 def _terminal_width() -> int:
@@ -861,10 +690,7 @@ class TerminalRenderer:
                 for threshold, phase_label in _phases:
                     if elapsed >= threshold:
                         label = phase_label
-                line = (
-                    f"\r{_CLEAR_LINE}"
-                    f"{_DIM}{frame} {label}...  {elapsed:.1f}s{_RESET}"
-                )
+                line = f"\r{_CLEAR_LINE}{_DIM}{frame} {label}...  {elapsed:.1f}s{_RESET}"
                 sys.stdout.write(line)
                 sys.stdout.flush()
         except asyncio.CancelledError:
@@ -1058,10 +884,7 @@ class TerminalRenderer:
                 for threshold, phase_label in _phases:
                     if elapsed >= threshold:
                         label = phase_label
-                line = (
-                    f"\r{_CLEAR_LINE}"
-                    f"{_DIM}{frame} {label}...  {elapsed:.1f}s{_RESET}"
-                )
+                line = f"\r{_CLEAR_LINE}{_DIM}{frame} {label}...  {elapsed:.1f}s{_RESET}"
                 sys.stdout.write(line)
                 sys.stdout.flush()
         except asyncio.CancelledError:
@@ -1159,9 +982,7 @@ class TerminalRenderer:
             # then \n brings cursor back to the bottom — no extra down move.
             sys.stdout.write(f"\033[1A\r{_CLEAR_LINE}{new_line}\n")
         else:
-            sys.stdout.write(
-                f"\033[{lines_up}A\r{_CLEAR_LINE}{new_line}\n\033[{lines_up - 1}B"
-            )
+            sys.stdout.write(f"\033[{lines_up}A\r{_CLEAR_LINE}{new_line}\n\033[{lines_up - 1}B")
         sys.stdout.flush()
 
     async def _overwrite_async(self, idx: int, new_line: str) -> None:
@@ -1181,9 +1002,7 @@ class TerminalRenderer:
                 # idx is already the last row; just overwrite in-place
                 sys.stdout.write(f"\r{_CLEAR_LINE}{new_line}")
             else:
-                sys.stdout.write(
-                    f"\033[{lines_up}A\r{_CLEAR_LINE}{new_line}\n\033[{lines_up - 1}B"
-                )
+                sys.stdout.write(f"\033[{lines_up}A\r{_CLEAR_LINE}{new_line}\n\033[{lines_up - 1}B")
             sys.stdout.flush()
 
     def _stop_spinner(self) -> None:
@@ -1299,90 +1118,6 @@ class TerminalRenderer:
         self._batch_size = 0
         self._overwrite_tasks.clear()
 
-    def on_plan(self, plan_text: str) -> None:
-        """Display the upfront plan as a folded-cards panel (Plan B).
-
-        Renders one row per step:  ① <icon> <purpose>   [batch · N cmds] ▸
-        Plus a footer with step count, command count, safety summary.
-        """
-        self._ensure_agent_label()
-        self._stop_waiting()
-        self._stop_generating()
-        self._stop_thinking_spinner()
-        self._end_thinking_compact()
-
-        from rich.panel import Panel
-        from rich.table import Table
-        from rich.text import Text as RichText
-
-        parsed = _parse_plan(plan_text)
-
-        # ── Build the body table (one row per step) ────────────────────────
-        body = Table.grid(expand=True, padding=(0, 1))
-        body.add_column(justify="left", no_wrap=True, width=4)       # ①
-        body.add_column(justify="left", no_wrap=True, width=2)       # icon
-        body.add_column(justify="left", ratio=1, overflow="fold")    # purpose
-        body.add_column(justify="right", no_wrap=True)               # badge
-        body.add_column(justify="right", no_wrap=True, width=2)      # ▸
-
-        _CIRCLED = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩",
-                    "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑱", "⑲", "⑳"]
-
-        total_cmds = 0
-        for i, step in enumerate(parsed.steps):
-            total_cmds += step.cmd_count
-            num = _CIRCLED[i] if i < len(_CIRCLED) else f"{i + 1}."
-            mode = step.mode  # "batch" | "seq" | ""
-            badge_color = "green" if mode == "batch" else "yellow" if mode == "seq" else "bright_black"
-            badge = f"[{badge_color}]\\[{mode} · {step.cmd_count} cmd{'s' if step.cmd_count != 1 else ''}][/{badge_color}]"
-            body.add_row(
-                f"[cyan]{num}[/cyan]",
-                f"{step.icon}",
-                f"[white]{step.purpose}[/white]",
-                badge,
-                "[bright_black]▸[/bright_black]",
-            )
-
-        # ── Header (Goal) + Footer (stats) ─────────────────────────────────
-        goal_line = RichText.from_markup(
-            f"[bold]Goal[/bold]  [white]{parsed.goal}[/white]"
-        ) if parsed.goal else RichText("")
-
-        safety_label = parsed.safety.strip() or "none"
-        safety_is_safe = safety_label.lower().lstrip().startswith(("none", "no risk", "read-only", "readonly", "只读")) or safety_label.lstrip().startswith("无")
-        safety_icon = "🔒" if safety_is_safe else "⚠\ufe0f "
-        safety_color = "green" if safety_is_safe else "yellow"
-
-        footer_line = RichText.from_markup(
-            f"  [bright_black]⏱  ~{max(5, total_cmds * 2)}s  ·  {safety_icon} [{safety_color}]{("safe" if safety_is_safe else _truncate_by_width(safety_label, 40))}[/{safety_color}]  ·  "
-            f"{len(parsed.steps)} steps / {total_cmds} cmds[/bright_black]"
-        )
-        # Assemble: goal → blank → body table → blank → footer
-        from rich.console import Group
-        group = Group(
-            goal_line if parsed.goal else RichText(""),
-            RichText(""),
-            body,
-            RichText(""),
-            footer_line,
-        )
-
-        # Force the panel to span the FULL terminal width.  Without an
-        # explicit width, rich sizes the panel to its inner content (the
-        # Table.grid) which can leave a gap on the right when the longest
-        # row is shorter than the terminal — visible as a missing border.
-        console.print(
-            Panel(
-                group,
-                title="[bold]📋 Plan[/bold]",
-                title_align="left",
-                border_style="cyan",
-                padding=(1, 2),
-                expand=True,
-                width=console.width,
-            )
-        )
-
     async def flush_async(self) -> None:
         """Async version of flush: awaits any in-flight overwrite tasks first.
 
@@ -1444,6 +1179,7 @@ class TerminalRenderer:
         elapsed = time.monotonic() - self._thinking_start
 
         import shutil
+
         term_w = shutil.get_terminal_size(fallback=(100, 24)).columns
         # Reserve space for the prefix "—> " (3 cols) and ellipsis
         snippet_budget = max(20, int(term_w * 0.80) - 3)

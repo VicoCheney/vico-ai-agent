@@ -43,7 +43,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from vico.core.types import AgentConfig, ContextConfig, LLMConfig, PlanningConfig, ToolsConfig
+from vico.core.types import AgentConfig, ContextConfig, LLMConfig, ToolsConfig
 
 
 def _find_config_root(cwd: str | None = None) -> Path:
@@ -137,9 +137,8 @@ def load_config(cwd: str | None = None) -> AgentConfig:
     llm = _parse_llm_config(rc)
     context = _parse_context_config(rc)
     tools = _parse_tools_config(rc)
-    planning = _parse_planning_config(rc)
 
-    return AgentConfig(llm=llm, context=context, tools=tools, planning=planning, cwd=working_dir)
+    return AgentConfig(llm=llm, context=context, tools=tools, cwd=working_dir)
 
 
 def lookup_provider(provider_name: str) -> dict[str, str]:
@@ -247,17 +246,3 @@ def _parse_tools_config(rc: dict[str, Any]) -> ToolsConfig:
         auto_approve=section.get("auto_approve", ["low"]),
         timeout_ms=section.get("timeout_ms", 30000),
     )
-
-
-def _parse_planning_config(rc: dict[str, Any]) -> PlanningConfig:
-    """Parse planning section from .vicorc.json."""
-    section = rc.get("planning", {})
-    cfg = PlanningConfig(
-        enabled=section.get("enabled", True),
-        min_words=section.get("min_words", 8),
-    )
-    # Merge user-supplied keywords into the default list (additive, not replace)
-    extra_keywords: list[str] = section.get("complexity_keywords", [])
-    if extra_keywords:
-        cfg.complexity_keywords = cfg.complexity_keywords + extra_keywords
-    return cfg

@@ -435,7 +435,6 @@ async def async_main() -> None:
         on_error=renderer.on_error,
         on_done=lambda pt, ct: renderer.on_done_with_usage(pt, ct),
         on_loop=renderer.on_loop,
-        on_plan=renderer.on_plan,
         request_approval=_approval_cb,
     )
 

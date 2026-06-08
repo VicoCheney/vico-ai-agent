@@ -18,8 +18,8 @@ from vico.core.types import (
     ToolUseBlock,
 )
 
-CHARS_PER_TOKEN = 4         # default ratio for ASCII / Latin text
-CJK_CHARS_PER_TOKEN = 1.5   # CJK ideographs are ~1.5 chars per token
+CHARS_PER_TOKEN = 4  # default ratio for ASCII / Latin text
+CJK_CHARS_PER_TOKEN = 1.5  # CJK ideographs are ~1.5 chars per token
 TOOL_DEF_OVERHEAD = 3000  # estimated tokens for tool definitions
 
 
@@ -33,12 +33,12 @@ def _count_cjk(text: str) -> int:
     for ch in text:
         cp = ord(ch)
         if (
-            0x4E00 <= cp <= 0x9FFF        # CJK Unified Ideographs
-            or 0x3400 <= cp <= 0x4DBF     # CJK Extension A
-            or 0x20000 <= cp <= 0x2A6DF   # CJK Extension B
-            or 0x3040 <= cp <= 0x30FF     # Hiragana + Katakana
-            or 0xAC00 <= cp <= 0xD7AF     # Hangul Syllables
-            or 0xFF00 <= cp <= 0xFFEF     # Full-width forms
+            0x4E00 <= cp <= 0x9FFF  # CJK Unified Ideographs
+            or 0x3400 <= cp <= 0x4DBF  # CJK Extension A
+            or 0x20000 <= cp <= 0x2A6DF  # CJK Extension B
+            or 0x3040 <= cp <= 0x30FF  # Hiragana + Katakana
+            or 0xAC00 <= cp <= 0xD7AF  # Hangul Syllables
+            or 0xFF00 <= cp <= 0xFFEF  # Full-width forms
         ):
             n += 1
     return n
