@@ -29,9 +29,14 @@ from vico.core.types import (
 MAX_RESULTS = 50
 MAX_OUTPUT_CHARS = 12_000
 
+# Cache the ripgrep availability check at module load time — the result is
+# stable for the lifetime of the process and shutil.which() does file-system
+# lookups that are wasteful to repeat on every search call.
+_RG_PATH: str | None = shutil.which("rg")
+
 
 def _has_ripgrep() -> bool:
-    return shutil.which("rg") is not None
+    return _RG_PATH is not None
 
 
 class SearchTool(Tool):

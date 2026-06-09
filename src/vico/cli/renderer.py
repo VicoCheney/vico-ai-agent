@@ -717,7 +717,7 @@ class TerminalRenderer:
             if self._had_tool_output:
                 self._had_tool_output = False
             # Print the two-line thinking header that the spinner will overwrite:
-            # Line 1: "🧠 Thingking (0.0s)"
+            # Line 1: "🧠 Thinking (0.0s)"
             # Line 2: "⠋⠋ <snippet>…"
             _write(f"{_DIM}🧠 Thinking (0.0s){_RESET}\n")
             _write(f"{_DIM}⠋⠋ …{_RESET}\n")
@@ -1016,7 +1016,7 @@ class TerminalRenderer:
         """Animate the two-line thinking indicator with live snippet and elapsed time.
 
         Format:
-          Line 1: 🧠 Thingking (3.5s)
+          Line 1: 🧠 Thinking (3.5s)
           Line 2: ⠋⠋ <snippet truncated to 80% terminal width>…
 
         The spinner overwrites the two lines printed by on_thinking() on first call.

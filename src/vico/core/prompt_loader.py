@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import re
+from functools import lru_cache
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateSyntaxError, UndefinedError
@@ -203,12 +204,13 @@ class PromptLoader:
 # Module-level singleton
 # ---------------------------------------------------------------------------
 
-_default_loader: PromptLoader | None = None
 
-
+@lru_cache(maxsize=1)
 def get_loader() -> PromptLoader:
-    """Return the module-level singleton ``PromptLoader`` instance."""
-    global _default_loader
-    if _default_loader is None:
-        _default_loader = PromptLoader()
-    return _default_loader
+    """Return the module-level singleton ``PromptLoader`` instance.
+
+    Uses ``functools.lru_cache`` instead of a bare global variable so that
+    the singleton can be safely invalidated in tests via
+    ``get_loader.cache_clear()`` without relying on ``global`` mutation.
+    """
+    return PromptLoader()

@@ -80,6 +80,8 @@ def _find_config_root(cwd: str | None = None) -> Path:
         return global_config
 
     # 4. Package source directory (works for editable installs)
+    # Assumes layout: src/vico/__init__.py → src/ → project_root/
+    # This is the standard `src`-layout used by this project.
     try:
         import vico  # noqa: F401
 
@@ -112,8 +114,8 @@ def _load_vicorc(root: Path) -> dict[str, Any]:
             return dict(json.loads(rc_path.read_text()))
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid JSON in '{rc_path}': {exc}") from exc
-        except Exception:
-            pass
+        except OSError as exc:
+            raise ValueError(f"Cannot read config '{rc_path}': {exc}") from exc
     return {}
 
 
@@ -237,7 +239,12 @@ def _parse_llm_config(rc: dict[str, Any]) -> LLMConfig:
 
 
 def _parse_context_config(rc: dict[str, Any]) -> ContextConfig:
-    """Parse context section from .vicorc.json."""
+    """Parse context section from .vicorc.json.
+
+    Note: defaults here intentionally differ from ContextConfig dataclass defaults.
+    ContextConfig defaults are conservative (for library use); these defaults are
+    tuned for production CLI use with large-context models (e.g. MiMo 1M ctx).
+    """
     section = rc.get("context", {})
     return ContextConfig(
         max_tokens=section.get("max_tokens", 1000000),

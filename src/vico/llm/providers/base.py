@@ -23,11 +23,13 @@ from vico.core.types import (
     LLMRequest,
     ReasoningChunk,
     StreamChunk,
+    TextBlock,
     TextChunk,
     TokenUsage,
     ToolCall,
     ToolCallChunk,
     ToolDefinition,
+    ToolResultBlock,
 )
 
 __all__ = ["LLM", "OpenAICompatibleLLM"]
@@ -45,7 +47,8 @@ def _parse_usage(usage: Any) -> TokenUsage | None:
             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
             total_tokens=getattr(usage, "total_tokens", 0) or 0,
         )
-    except Exception:
+    except Exception as exc:
+        _logger.warning("_parse_usage: failed to parse usage object %r: %s", usage, exc)
         return None
 
 
@@ -76,17 +79,16 @@ class OpenAICompatibleLLM(LLM):
 
         for msg in request.messages:
             if msg.role == "user":
-                # Use isinstance checks instead of hasattr("text") so that
-                # ToolResultBlock (field is "content", not "text") is never
-                # silently dropped.  Unknown block types are logged as a warning.
+                # Use isinstance checks to avoid silently dropping unknown block types
+                # (hasattr duck-typing can collide when a block has both "text"/"content").
                 if isinstance(msg.content, str):
                     content = msg.content
                 else:
                     parts: list[str] = []
                     for b in msg.content:
-                        if hasattr(b, "text"):
+                        if isinstance(b, TextBlock):
                             parts.append(b.text)
-                        elif hasattr(b, "content"):
+                        elif isinstance(b, ToolResultBlock):
                             parts.append(b.content)
                         else:
                             _logger.warning(
@@ -148,6 +150,33 @@ class OpenAICompatibleLLM(LLM):
     # ─── Shared stream processor ──────────────────────────────────────────────
 
     @staticmethod
+    def _flush_pending_tool_calls(
+        pending_tool_calls: dict[int, dict[str, str]],
+    ) -> list[ToolCallChunk]:
+        """Parse and yield ToolCallChunks from buffered streaming tool-call fragments.
+
+        Called when a finish_reason arrives or the stream ends without one,
+        so that partially-streamed tool calls are always emitted exactly once.
+        """
+        chunks: list[ToolCallChunk] = []
+        for tc_data in pending_tool_calls.values():
+            try:
+                tool_input = json.loads(tc_data["args_buffer"] or "{}")
+            except json.JSONDecodeError:
+                tool_input = {"_raw": tc_data["args_buffer"]}
+            chunks.append(
+                ToolCallChunk(
+                    tool_call=ToolCall(
+                        id=tc_data["id"],
+                        name=tc_data["name"],
+                        input=tool_input,
+                    )
+                )
+            )
+        pending_tool_calls.clear()
+        return chunks
+
+    @staticmethod
     async def _process_stream(raw_stream: Any) -> AsyncGenerator[StreamChunk, None]:
         """
         Consume a raw AsyncOpenAI streaming response and yield StreamChunks.
@@ -201,19 +230,8 @@ class OpenAICompatibleLLM(LLM):
 
             # Flush accumulated tool calls on any terminal finish_reason.
             if choice.finish_reason is not None and pending_tool_calls:
-                for tc_data in pending_tool_calls.values():
-                    try:
-                        tool_input = json.loads(tc_data["args_buffer"] or "{}")
-                    except json.JSONDecodeError:
-                        tool_input = {"_raw": tc_data["args_buffer"]}
-                    yield ToolCallChunk(
-                        tool_call=ToolCall(
-                            id=tc_data["id"],
-                            name=tc_data["name"],
-                            input=tool_input,
-                        )
-                    )
-                pending_tool_calls.clear()
+                for chunk in OpenAICompatibleLLM._flush_pending_tool_calls(pending_tool_calls):
+                    yield chunk
 
             if choice.finish_reason is not None:
                 if deferred_usage is not None:
@@ -228,19 +246,8 @@ class OpenAICompatibleLLM(LLM):
         # Stream ended — flush any pending tool calls a non-compliant provider
         # may have left dangling (no finish_reason ever arrived).
         if pending_tool_calls:
-            for tc_data in pending_tool_calls.values():
-                try:
-                    tool_input = json.loads(tc_data["args_buffer"] or "{}")
-                except json.JSONDecodeError:
-                    tool_input = {"_raw": tc_data["args_buffer"]}
-                yield ToolCallChunk(
-                    tool_call=ToolCall(
-                        id=tc_data["id"],
-                        name=tc_data["name"],
-                        input=tool_input,
-                    )
-                )
-            pending_tool_calls.clear()
+            for chunk in OpenAICompatibleLLM._flush_pending_tool_calls(pending_tool_calls):
+                yield chunk
 
         # Stream ended — emit DoneChunk if finish_reason was set without a trailing chunk.
         if finish_reason is not None:

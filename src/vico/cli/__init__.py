@@ -166,9 +166,9 @@ async def _run_selector(
         erase_when_done=True,
     )
 
-    app_task = asyncio.ensure_future(app.run_async())
-    cancel_waiter = asyncio.ensure_future(cancel_event.wait())
-    quit_waiter = asyncio.ensure_future(quit_event.wait())
+    app_task = asyncio.create_task(app.run_async())
+    cancel_waiter = asyncio.create_task(cancel_event.wait())
+    quit_waiter = asyncio.create_task(quit_event.wait())
     done, pending = await asyncio.wait(
         {app_task, cancel_waiter, quit_waiter},
         return_when=asyncio.FIRST_COMPLETED,
@@ -407,7 +407,7 @@ async def repl(
         if quit_event.is_set():
             break
 
-        stats = agent._context.get_stats("")
+        stats = agent.get_context_stats()
         renderer.print_context_stats(stats)
 
 

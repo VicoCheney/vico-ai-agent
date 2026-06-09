@@ -33,6 +33,9 @@ from vico.core.types import (
 )
 
 MAX_OUTPUT_CHARS = 30_000
+# Read stdout in 64 KiB chunks to bound memory usage while streaming output.
+# Smaller values increase syscall overhead; larger values delay OOM-kill reaction.
+_READ_CHUNK_SIZE = 65_536
 
 # Commands that may request interactive TTY input (read /dev/tty directly and will hang).
 _INTERACTIVE_PATTERNS: list[re.Pattern[str]] = [
@@ -230,7 +233,6 @@ class BashTool(Tool):
         # wins causes the other two to be cancelled and the process tree to
         # be killed.
         # ─────────────────────────────────────────────────────────────────────
-        _READ_CHUNK = 65_536  # 64 KiB per read syscall
 
         output_chunks: list[str] = []
         timed_out = False
@@ -243,7 +245,7 @@ class BashTool(Tool):
             nonlocal output_bytes
             assert process.stdout is not None
             while True:
-                chunk = await process.stdout.read(_READ_CHUNK)
+                chunk = await process.stdout.read(_READ_CHUNK_SIZE)
                 if not chunk:
                     break
                 decoded = chunk.decode(errors="replace")

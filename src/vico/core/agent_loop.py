@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from vico.core.context_manager import ContextManager
 from vico.core.permission_controller import PermissionController
@@ -22,9 +23,21 @@ from vico.core.types import (
     TextChunk,
     ToolCall,
     ToolCallChunk,
+    ToolExecutionContext,
     ToolResult,
 )
 from vico.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from vico.core.context_manager import ContextStats
+
+logger = logging.getLogger(__name__)
+
+# Approval label constants — shared between _dispatch_tool_calls and _execute_one
+# to guarantee consistent values without risking silent string mismatch.
+_APPROVAL_AUTO = "auto approved"
+_APPROVAL_ONCE = "approved"
+_APPROVAL_ALWAYS = "approved always"
 
 OnThinkingCallback = Callable[[str], None]
 OnTextCallback = Callable[[str], None]
@@ -121,7 +134,7 @@ class AgentLoop:
         try:
             await self._loop(max_iterations)
         except asyncio.CancelledError:
-            pass
+            logger.debug("Agent run cancelled (user requested stop).")
         except Exception as exc:
             cb = self._callbacks.on_error
             if cb:
@@ -268,7 +281,7 @@ class AgentLoop:
                     success=False,
                     output="",
                     error=f"Unexpected error: {outcome}",
-                    metadata={"approval": "auto approved"},
+                    metadata={"approval": _APPROVAL_AUTO},
                 )
                 cb_tr = self._callbacks.on_tool_result
                 if cb_tr:
@@ -280,13 +293,11 @@ class AgentLoop:
 
     async def _execute_one(self, tool_call: ToolCall) -> tuple[ToolCall, ToolResult]:
         """Permission check → execute → notify UI for a single tool call."""
-        from vico.core.types import ToolExecutionContext
-
         if self._cancel_event.is_set():
             return tool_call, ToolResult(success=False, output="", error="Cancelled")
 
         auto_approved = self._permissions.is_auto_approved(tool_call, self._tool_registry)
-        approval_label: str = "auto approved"
+        approval_label: str = _APPROVAL_AUTO
 
         if not auto_approved:
             async with self._approval_lock:
@@ -301,7 +312,7 @@ class AgentLoop:
 
                     if decision == "approve_always":
                         self._permissions.grant_session_approval(tool_call.name)
-                        approval_label = "approved always"
+                        approval_label = _APPROVAL_ALWAYS
                     elif decision == "deny":
                         denied = ToolResult(
                             success=False,
@@ -314,9 +325,9 @@ class AgentLoop:
                             cb_tr(tool_call, denied)
                         return tool_call, denied
                     else:
-                        approval_label = "approved"
+                        approval_label = _APPROVAL_ONCE
                 else:
-                    approval_label = "auto approved"
+                    approval_label = _APPROVAL_AUTO
 
         exec_ctx = ToolExecutionContext(
             cwd=self._config.cwd,
@@ -331,6 +342,14 @@ class AgentLoop:
             cb_tr(tool_call, result)
 
         return tool_call, result
+
+    def get_context_stats(self, system_prompt: str = "") -> ContextStats:
+        """Return current context token usage statistics.
+
+        Exposes context stats as a public API so callers do not need to reach
+        into the private ``_context`` attribute, preserving encapsulation.
+        """
+        return self._context.get_stats(system_prompt)
 
     def reset(self) -> None:
         """Reset context for a new conversation."""

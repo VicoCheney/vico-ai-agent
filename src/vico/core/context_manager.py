@@ -4,6 +4,7 @@ Context Manager
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -19,7 +20,12 @@ from vico.core.types import (
 )
 from vico.utils.text_utils import estimate_tokens as _estimate_tokens
 
+logger = logging.getLogger(__name__)
+
 TOOL_DEF_OVERHEAD = 3000  # estimated tokens for tool definitions
+# OpenAI chat message formatting overhead per message (role + delimiter tokens).
+# See: https://platform.openai.com/docs/guides/chat/introduction
+_MSG_OVERHEAD_TOKENS = 4
 
 
 @dataclass
@@ -135,7 +141,7 @@ class ContextManager:
                 elif isinstance(b, ToolResultBlock):
                     parts.append(b.content)
             raw = "".join(parts)
-        return self.estimate_tokens(raw) + 4  # +4 for role/formatting overhead
+        return self.estimate_tokens(raw) + _MSG_OVERHEAD_TOKENS
 
     def estimate_total_tokens(self, system_prompt: str) -> int:
         system_tokens = self.estimate_tokens(system_prompt)
@@ -191,8 +197,7 @@ class ContextManager:
         if removed_count <= 0:
             if len(self._messages) <= 2:
                 # Cannot compress further — log and return without mutating.
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     "ContextManager: cannot compress further (only %d messages remain). "
                     "Consider increasing max_tokens or reducing system prompt size.",
                     len(self._messages),

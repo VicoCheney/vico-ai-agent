@@ -5,7 +5,7 @@ description = "An all-powerful AI agent assistant, armed with imagination"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "chenweichao", email = "chenweichao@kuaishou.com" }]
+authors = [{ name = "chenweichao", email = "vicocheney@outlook.com" }]
 keywords = ["ai", "agent", "cli", "llm", "coding-assistant"]
 classifiers = [
     "Development Status :: 3 - Alpha",
