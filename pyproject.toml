@@ -1,12 +1,22 @@
 [project]
 name = "vico-ai-agent"
-version = "0.1.0"
+dynamic = ["version"]
 description = "An all-powerful AI agent assistant, armed with imagination"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-keywords = ["ai", "agent", "cli"]
-
+authors = [{ name = "chenweichao", email = "chenweichao@kuaishou.com" }]
+keywords = ["ai", "agent", "cli", "llm", "coding-assistant"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "openai>=1.50.0",
     "python-dotenv>=1.0.0",
@@ -16,12 +26,19 @@ dependencies = [
     "jinja2>=3.1.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/VicoCheney/vico-ai-agent"
+Repository = "https://github.com/VicoCheney/vico-ai-agent"
+"Bug Tracker" = "https://github.com/VicoCheney/vico-ai-agent/issues"
+
 [project.scripts]
 vico = "vico.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vico"]
 
+[tool.hatch.version]
+path = "src/vico/__init__.py"
 
 [build-system]
 requires = ["hatchling"]

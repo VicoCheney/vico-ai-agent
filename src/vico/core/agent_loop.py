@@ -139,51 +139,7 @@ class AgentLoop:
                 cb_loop(iteration)
 
             # ── Step 1: Call LLM ─────────────────────────────────────────
-            messages = self._context.get_messages()
-            tool_defs = self._tool_registry.get_definitions() if self._llm.supports_tool_use() else None
-
-            accumulated_text = ""
-            pending_tool_calls: list[ToolCall] = []
-
-            stream = self._llm.stream(
-                LLMRequest(
-                    system=self._system_prompt,
-                    messages=messages,
-                    tools=tool_defs,
-                    max_tokens=self._config.llm.max_tokens,
-                    temperature=self._config.llm.temperature,
-                )
-            )
-
-            async for chunk in stream:
-                if self._cancel_event.is_set():
-                    break
-
-                if isinstance(chunk, TextChunk):
-                    accumulated_text += chunk.content
-                    cb = self._callbacks.on_text
-                    if cb:
-                        cb(chunk.content)
-
-                elif isinstance(chunk, ReasoningChunk):
-                    cb = self._callbacks.on_thinking
-                    if cb:
-                        cb(chunk.content)
-
-                elif isinstance(chunk, ToolCallChunk):
-                    pending_tool_calls.append(chunk.tool_call)
-
-                elif isinstance(chunk, DoneChunk):
-                    pt = chunk.usage.prompt_tokens if chunk.usage else 0
-                    ct = chunk.usage.completion_tokens if chunk.usage else 0
-                    if chunk.usage:
-                        self._context.update_last_usage(chunk.usage)
-                    cb_done = self._callbacks.on_done
-                    if cb_done:
-                        cb_done(pt, ct)
-
-                elif isinstance(chunk, ErrorChunk):
-                    raise chunk.error
+            accumulated_text, pending_tool_calls = await self._stream_llm()
 
             # ── Step 2: Save assistant response to context ───────────────
             self._context.add_assistant_message(
@@ -196,58 +152,7 @@ class AgentLoop:
                 break
 
             # ── Step 4: Execute tool calls ────────────────────────────────
-            #
-            # If any tool requires approval, run sequentially so the approval
-            # dialog gets a clean terminal without concurrent tool output.
-            # Otherwise, run all tools concurrently for speed.
-
-            needs_approval = any(
-                not self._permissions.is_auto_approved(tc, self._tool_registry) for tc in pending_tool_calls
-            )
-
-            if needs_approval:
-                tool_results: list[tuple[ToolCall, ToolResult]] = []
-                for tc in pending_tool_calls:
-                    cb_tc = self._callbacks.on_tool_call
-                    # Always notify the renderer so it can track the tool call.
-                    # For auto-approved tools this starts the spinner; for tools
-                    # that need approval the renderer records the call so that
-                    # collapse_permission_request() and on_tool_result() work
-                    # correctly even when they skip the spinner row.
-                    if cb_tc:
-                        cb_tc(tc)
-                    # Execute immediately so the spinner resolves before the
-                    # permission box for the next tool appears.
-                    result_pair = await self._execute_one(tc)
-                    tool_results.append(result_pair)
-            else:
-                cb_tc = self._callbacks.on_tool_call
-                for tc in pending_tool_calls:
-                    if cb_tc:
-                        cb_tc(tc)
-                # Use return_exceptions=True so that an unexpected exception in one
-                # tool does not cancel the other concurrent tools.  Any BaseException
-                # results are re-wrapped as failed ToolResults and fed back to the LLM
-                # so the agent can recover gracefully instead of aborting the whole turn.
-                raw_results = await asyncio.gather(
-                    *[self._execute_one(tc) for tc in pending_tool_calls],
-                    return_exceptions=True,
-                )
-                tool_results = []
-                for tc, outcome in zip(pending_tool_calls, raw_results):
-                    if isinstance(outcome, BaseException):
-                        err_result = ToolResult(
-                            success=False,
-                            output="",
-                            error=f"Unexpected error: {outcome}",
-                            metadata={"approval": "auto approved"},
-                        )
-                        cb_tr = self._callbacks.on_tool_result
-                        if cb_tr:
-                            cb_tr(tc, err_result)
-                        tool_results.append((tc, err_result))
-                    else:
-                        tool_results.append(outcome)
+            tool_results = await self._dispatch_tool_calls(pending_tool_calls)
 
             for tool_call, result in tool_results:
                 self._context.add_tool_result(
@@ -258,6 +163,120 @@ class AgentLoop:
                 )
 
             self._context.maybe_compress(self._system_prompt)
+
+    async def _stream_llm(self) -> tuple[str, list[ToolCall]]:
+        """Call the LLM and collect the full response.
+
+        Streams text/reasoning/tool-call chunks, fires the corresponding
+        callbacks, and returns ``(accumulated_text, pending_tool_calls)``
+        once the stream is exhausted or cancelled.
+        """
+        messages = self._context.get_messages()
+        tool_defs = self._tool_registry.get_definitions() if self._llm.supports_tool_use() else None
+
+        accumulated_text = ""
+        pending_tool_calls: list[ToolCall] = []
+
+        stream = self._llm.stream(
+            LLMRequest(
+                system=self._system_prompt,
+                messages=messages,
+                tools=tool_defs,
+                max_tokens=self._config.llm.max_tokens,
+                temperature=self._config.llm.temperature,
+            )
+        )
+
+        async for chunk in stream:
+            if self._cancel_event.is_set():
+                break
+
+            if isinstance(chunk, TextChunk):
+                accumulated_text += chunk.content
+                cb = self._callbacks.on_text
+                if cb:
+                    cb(chunk.content)
+
+            elif isinstance(chunk, ReasoningChunk):
+                cb = self._callbacks.on_thinking
+                if cb:
+                    cb(chunk.content)
+
+            elif isinstance(chunk, ToolCallChunk):
+                pending_tool_calls.append(chunk.tool_call)
+
+            elif isinstance(chunk, DoneChunk):
+                pt = chunk.usage.prompt_tokens if chunk.usage else 0
+                ct = chunk.usage.completion_tokens if chunk.usage else 0
+                if chunk.usage:
+                    self._context.update_last_usage(chunk.usage)
+                cb_done = self._callbacks.on_done
+                if cb_done:
+                    cb_done(pt, ct)
+
+            elif isinstance(chunk, ErrorChunk):
+                raise chunk.error
+
+        return accumulated_text, pending_tool_calls
+
+    async def _dispatch_tool_calls(
+        self,
+        pending_tool_calls: list[ToolCall],
+    ) -> list[tuple[ToolCall, ToolResult]]:
+        """Execute a batch of tool calls and return ``(ToolCall, ToolResult)`` pairs.
+
+        If any tool requires human approval the calls are run **sequentially**
+        so the approval dialog gets a clean terminal without concurrent output.
+        Otherwise all tools run **concurrently** via ``asyncio.gather`` for speed.
+
+        ``return_exceptions=True`` is used in the concurrent path so that an
+        unexpected exception in one tool does not cancel the others.  Such
+        exceptions are wrapped as failed ``ToolResult``s and fed back to the LLM
+        so the agent can recover gracefully instead of aborting the whole turn.
+        """
+        needs_approval = any(
+            not self._permissions.is_auto_approved(tc, self._tool_registry)
+            for tc in pending_tool_calls
+        )
+
+        cb_tc = self._callbacks.on_tool_call
+
+        if needs_approval:
+            # Sequential path — preserves terminal cleanliness for approval dialogs.
+            # Each tool is notified then immediately executed (interleaved) so the
+            # spinner for one tool resolves before the approval box for the next one.
+            tool_results: list[tuple[ToolCall, ToolResult]] = []
+            for tc in pending_tool_calls:
+                if cb_tc:
+                    cb_tc(tc)
+                result_pair = await self._execute_one(tc)
+                tool_results.append(result_pair)
+            return tool_results
+
+        # Concurrent path — notify all tools first, then run them in parallel.
+        for tc in pending_tool_calls:
+            if cb_tc:
+                cb_tc(tc)
+        raw_results = await asyncio.gather(
+            *[self._execute_one(tc) for tc in pending_tool_calls],
+            return_exceptions=True,
+        )
+        tool_results = []
+        for tc, outcome in zip(pending_tool_calls, raw_results):
+            if isinstance(outcome, BaseException):
+                err_result = ToolResult(
+                    success=False,
+                    output="",
+                    error=f"Unexpected error: {outcome}",
+                    metadata={"approval": "auto approved"},
+                )
+                cb_tr = self._callbacks.on_tool_result
+                if cb_tr:
+                    cb_tr(tc, err_result)
+                tool_results.append((tc, err_result))
+            else:
+                tool_results.append(outcome)
+        return tool_results
 
     async def _execute_one(self, tool_call: ToolCall) -> tuple[ToolCall, ToolResult]:
         """Permission check → execute → notify UI for a single tool call."""

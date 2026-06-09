@@ -245,8 +245,11 @@ class LLMConfig:
     top_p: float | None = None
     stop: list[str] | None = None
     thinking_enabled: bool = True
-    reasoning_effort: str = "max"  # DeepSeek: "high" | "max"
-    response_format: str = "text"  # "text" | "json_object"
+    # Provider-specific parameters (e.g. reasoning_effort for DeepSeek,
+    # response_format for any provider that supports it).
+    # Kept out of the top-level fields to avoid polluting the generic config
+    # with vendor-specific knobs that don't apply to every LLM.
+    provider_options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

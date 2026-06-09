@@ -21,6 +21,7 @@ def create_llm_from_config(config: AgentConfig | LLMConfig) -> LLM:
     """Create an LLM from AgentConfig or LLMConfig."""
     llm_config = config.llm if isinstance(config, AgentConfig) else config
 
+    opts = llm_config.provider_options
     return _build_llm(
         provider=llm_config.provider,
         api_key=llm_config.api_key,
@@ -31,8 +32,8 @@ def create_llm_from_config(config: AgentConfig | LLMConfig) -> LLM:
         top_p=llm_config.top_p,
         stop=llm_config.stop,
         thinking_enabled=llm_config.thinking_enabled,
-        reasoning_effort=llm_config.reasoning_effort,
-        response_format=llm_config.response_format,
+        reasoning_effort=opts.get("reasoning_effort", "max"),
+        response_format=opts.get("response_format", "text"),
     )
 
 

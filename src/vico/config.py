@@ -224,8 +224,15 @@ def _parse_llm_config(rc: dict[str, Any]) -> LLMConfig:
         top_p=_get("top_p", None),
         stop=_get("stop", None),
         thinking_enabled=_get("thinking_enabled", True),
-        reasoning_effort=_get("reasoning_effort", "max"),
-        response_format=_get("response_format", "text"),
+        # Collect provider-specific knobs into provider_options so that
+        # the generic LLMConfig stays free of vendor-specific fields.
+        provider_options={
+            k: _get(k, default)
+            for k, default in {
+                "reasoning_effort": "max",   # DeepSeek only
+                "response_format": "text",   # optional for any provider
+            }.items()
+        },
     )
 
 

@@ -33,6 +33,8 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateSyntaxError, UndefinedError
 
+from vico.utils.text_utils import estimate_tokens
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -79,40 +81,6 @@ class PromptValidationError(PromptError):
 
 class PromptTemplateError(PromptError):
     """Jinja2 template rendering failed."""
-
-
-# ---------------------------------------------------------------------------
-# Token estimation
-# ---------------------------------------------------------------------------
-
-_CJK_RANGES = (
-    (0x4E00, 0x9FFF),
-    (0x3400, 0x4DBF),
-    (0x20000, 0x2A6DF),
-    (0x3040, 0x30FF),
-    (0xAC00, 0xD7AF),
-    (0xFF00, 0xFFEF),
-)
-
-
-def _count_cjk(text: str) -> int:
-    n = 0
-    for ch in text:
-        cp = ord(ch)
-        for lo, hi in _CJK_RANGES:
-            if lo <= cp <= hi:
-                n += 1
-                break
-    return n
-
-
-def estimate_tokens(text: str) -> int:
-    """Rough token estimate: ASCII ~4 chars/token, CJK ~1.5 chars/token."""
-    if not text:
-        return 0
-    cjk = _count_cjk(text)
-    other = len(text) - cjk
-    return max(1, int(cjk / 1.5) + other // 4)
 
 
 # ---------------------------------------------------------------------------

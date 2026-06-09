@@ -13,6 +13,7 @@ Shared logic:
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -30,6 +31,8 @@ from vico.core.types import (
 )
 
 __all__ = ["LLM", "OpenAICompatibleLLM"]
+
+_logger = logging.getLogger(__name__)
 
 
 def _parse_usage(usage: Any) -> TokenUsage | None:
@@ -79,7 +82,6 @@ class OpenAICompatibleLLM(LLM):
                 if isinstance(msg.content, str):
                     content = msg.content
                 else:
-                    import logging as _logging
                     parts: list[str] = []
                     for b in msg.content:
                         if hasattr(b, "text"):
@@ -87,7 +89,7 @@ class OpenAICompatibleLLM(LLM):
                         elif hasattr(b, "content"):
                             parts.append(b.content)
                         else:
-                            _logging.getLogger(__name__).warning(
+                            _logger.warning(
                                 "_build_messages: unknown user content block type %s, skipping",
                                 type(b).__name__,
                             )

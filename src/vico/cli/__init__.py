@@ -39,6 +39,7 @@ _BRIGHT_BLK = "\033[90m"
 _WHITE_BOLD = "\033[1;37m"
 
 _PROMPT_STR = ANSI(f"\n{_BRIGHT_BLK}👤 You: {_RESET}")
+_PROMPT_CONT = ANSI(f"{_BRIGHT_BLK}         {_RESET}")  # continuation indent (9 spaces, aligns with "You: ")
 
 
 # ─── Ctrl+C key binding for prompt-toolkit ───────────────────────────────────
@@ -48,6 +49,15 @@ def _make_prompt_key_bindings(
     quit_event: asyncio.Event,
     cancel_event: asyncio.Event | None = None,
 ) -> KeyBindings:
+    """Build key bindings for the multiline input prompt.
+
+    Submit keys  : Enter (always submits immediately).
+    Newline keys : Alt+Enter, Escape→Enter, or Ctrl+J (insert a literal newline).
+    Cancel key   : Ctrl+C exits / cancels the current run.
+
+    This matches the convention used by Claude Code, Gemini CLI, Codex CLI,
+    Slack, and most modern chat interfaces: Enter = send, Alt+Enter = newline.
+    """
     kb = KeyBindings()
 
     @kb.add("c-c")
@@ -56,6 +66,17 @@ def _make_prompt_key_bindings(
         if cancel_event is not None:
             cancel_event.set()
         event.app.exit(result="")
+
+    @kb.add("enter")
+    def _submit(event):  # type: ignore[no-untyped-def]
+        """Enter: always submit the buffer."""
+        event.app.current_buffer.validate_and_handle()
+
+    @kb.add("escape", "enter", eager=True)
+    @kb.add("c-j")
+    def _newline(event):  # type: ignore[no-untyped-def]
+        """Alt+Enter or Ctrl+J: insert a literal newline without submitting."""
+        event.app.current_buffer.insert_text("\n")
 
     return kb
 
@@ -205,6 +226,7 @@ def print_help() -> None:
     tips = [
         "Vico can read files, search code, and run shell commands",
         "High-risk commands require your approval before running",
+        "Enter to send · Alt+Enter or Ctrl+J to insert a newline",
         "Ctrl+C during response to stop  ·  Ctrl+C when idle to exit",
     ]
     for tip in tips:
@@ -309,6 +331,8 @@ async def repl(
             with patch_stdout(raw=True):
                 user_input = await session.prompt_async(
                     _PROMPT_STR,
+                    prompt_continuation=_PROMPT_CONT,
+                    multiline=True,
                     key_bindings=prompt_kb,
                 )
         except (EOFError, KeyboardInterrupt):

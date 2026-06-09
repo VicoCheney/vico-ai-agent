@@ -27,94 +27,35 @@ from vico.core.prompt_loader import get_loader
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Vico persona resolution
+# Persona / profile file resolution
 # ---------------------------------------------------------------------------
 
 
-def _resolve_vico_persona(cwd: str, default_vico: Path) -> str:
-    """Load the agent's persona from the highest-priority source.
+def _resolve_prompt_file(filename: str, cwd: str, default_path: Path) -> str:
+    """Load a persona/profile Markdown file from the highest-priority source.
 
-    Priority: <cwd>/.vico/Vico.md > ~/.vico/Vico.md > project Vico.md
-    If none exists, return empty string.
+    Search order (first non-empty file wins):
+      1. ``<cwd>/.vico/<filename>``  — project-level override
+      2. ``~/.vico/<filename>``      — user-level override
+      3. *default_path*              — bundled default in the prompts directory
+
+    Returns the file's text content (stripped), or an empty string if none
+    of the candidates exists or all are empty.
     """
-    # 1. Project-level override (highest priority)
-    project_vico = Path(cwd) / ".vico" / "Vico.md"
-    if project_vico.exists():
-        try:
-            content = project_vico.read_text(encoding="utf-8").strip()
-            if content:
-                logger.debug("Using project-level Vico persona: %s", project_vico)
-                return content
-        except OSError:
-            pass
-
-    # 2. User-level override
-    user_vico = Path.home() / ".vico" / "Vico.md"
-    if user_vico.exists():
-        try:
-            content = user_vico.read_text(encoding="utf-8").strip()
-            if content:
-                logger.debug("Using user-level Vico persona: %s", user_vico)
-                return content
-        except OSError:
-            pass
-
-    # 3. Default from prompts directory
-    if default_vico.exists():
-        try:
-            content = default_vico.read_text(encoding="utf-8").strip()
-            if content:
-                logger.debug("Using default Vico persona: %s", default_vico)
-                return content
-        except OSError:
-            pass
-
-    return ""
-
-
-# ---------------------------------------------------------------------------
-# User profile resolution
-# ---------------------------------------------------------------------------
-
-
-def _resolve_user_profile(cwd: str, default_user: Path) -> str:
-    """Load the user's profile from the highest-priority source.
-
-    Priority: <cwd>/.vico/User.md > ~/.vico/User.md > project User.md
-    If none exists, return empty string.
-    """
-    # 1. Project-level override (highest priority)
-    project_user = Path(cwd) / ".vico" / "User.md"
-    if project_user.exists():
-        try:
-            content = project_user.read_text(encoding="utf-8").strip()
-            if content:
-                logger.debug("Using project-level User profile: %s", project_user)
-                return content
-        except OSError:
-            pass
-
-    # 2. User-level override
-    user_user = Path.home() / ".vico" / "User.md"
-    if user_user.exists():
-        try:
-            content = user_user.read_text(encoding="utf-8").strip()
-            if content:
-                logger.debug("Using user-level User profile: %s", user_user)
-                return content
-        except OSError:
-            pass
-
-    # 3. Default from prompts directory
-    if default_user.exists():
-        try:
-            content = default_user.read_text(encoding="utf-8").strip()
-            if content:
-                logger.debug("Using default User profile: %s", default_user)
-                return content
-        except OSError:
-            pass
-
+    candidates: list[Path] = [
+        Path(cwd) / ".vico" / filename,
+        Path.home() / ".vico" / filename,
+        default_path,
+    ]
+    for path in candidates:
+        if path.exists():
+            try:
+                content = path.read_text(encoding="utf-8").strip()
+                if content:
+                    logger.debug("Loaded prompt file %s from %s", filename, path)
+                    return content
+            except OSError:
+                pass
     return ""
 
 
@@ -160,10 +101,10 @@ def build_system_prompt(cwd: str) -> str:
     loader = get_loader()
 
     # Resolve vico_content: <cwd>/.vico/Vico.md > ~/.vico/Vico.md > prompts/Vico.md
-    variables["vico_content"] = _resolve_vico_persona(cwd, loader.prompts_dir / "Vico.md")
+    variables["vico_content"] = _resolve_prompt_file("Vico.md", cwd, loader.prompts_dir / "Vico.md")
 
     # Resolve user_content: <cwd>/.vico/User.md > ~/.vico/User.md > prompts/User.md
-    variables["user_content"] = _resolve_user_profile(cwd, loader.prompts_dir / "User.md")
+    variables["user_content"] = _resolve_prompt_file("User.md", cwd, loader.prompts_dir / "User.md")
 
     # One call renders Agent.md with all {% include %} and {{ }} resolved
     prompt = loader.render(variables)
