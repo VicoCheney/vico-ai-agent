@@ -208,10 +208,14 @@ async def request_approval(
 
 
 def print_help() -> None:
+    import shutil
+
+    w = shutil.get_terminal_size(fallback=(80, 24)).columns
+    div = f"[dim]{'─' * w}[/dim]"
     console.print()
-    console.print("[dim]──────────────────────────────────────[/dim]")
+    console.print(div)
     console.print("[bold]  Commands[/bold]")
-    console.print("[dim]──────────────────────────────────────[/dim]")
+    console.print(div)
     cmds = [
         ("/clear", "Clear conversation history"),
         ("/model", "Show current provider & model"),
@@ -231,7 +235,7 @@ def print_help() -> None:
     ]
     for tip in tips:
         console.print(f"  [dim]•  {tip}[/dim]")
-    console.print("[dim]──────────────────────────────────────[/dim]")
+    console.print(div)
     console.print()
 
 

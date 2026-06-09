@@ -613,7 +613,7 @@ class TerminalRenderer:
         console.print()
 
     def print_divider(self) -> None:
-        console.print(Text("─" * 60, style=SEPARATOR_COLOR))
+        console.print(Text("─" * _terminal_width(), style=SEPARATOR_COLOR))
 
     # ── Per-turn reset ──────────────────────────────────────────────────────
 
