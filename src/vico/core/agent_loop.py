@@ -87,6 +87,16 @@ class AgentLoop:
     def state(self) -> AgentState:
         return self._state
 
+    @property
+    def cancel_event(self) -> asyncio.Event:
+        """The cancellation event for this agent run.
+
+        Expose as a public property so callers (e.g. the approval callback
+        in cli/__init__.py) don't need to reach into the private _cancel_event
+        attribute, preserving encapsulation for future refactors.
+        """
+        return self._cancel_event
+
     def cancel(self) -> None:
         """Request cancellation of the current run."""
         self._cancel_event.set()
@@ -215,7 +225,6 @@ class AgentLoop:
                 for tc in pending_tool_calls:
                     if cb_tc:
                         cb_tc(tc)
-                # codeflicker-fix: EDGE-Issue-007/nbd7ve5rigvbc2siplzv
                 # Use return_exceptions=True so that an unexpected exception in one
                 # tool does not cancel the other concurrent tools.  Any BaseException
                 # results are re-wrapped as failed ToolResults and fed back to the LLM

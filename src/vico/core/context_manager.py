@@ -176,21 +176,31 @@ class ContextManager:
         """Compress context if approaching the token limit.
 
         Keeps recent messages by walking backwards and accumulating token
-        estimates until the budget is consumed.  Uses role="user" for the
-        summary message to satisfy strict user/assistant alternation rules.
+        estimates until the budget is consumed.
+
+        To avoid violating user/assistant alternation rules, the summary
+        message is inserted using role="system" (supported by all OpenAI-
+        compatible providers and does not count against alternation rules).
 
         Returns True if compression occurred.
+
+        Guard against dead-loop: when system+tools already exceed the
+        # budget, kept may equal self._messages (removed_count==0).  We now
+        # force-drop all but the last 2 messages in that case so compression
+        # always makes progress.  Also switched summary role from "user" to
+        # "system" to avoid producing consecutive user messages when the
+        # first kept message is already a user turn.
         """
         total = self.estimate_total_tokens(system_prompt)
         budget = self._max_tokens - self._reserve_tokens
 
-        if total / budget < self._compression_threshold:
+        if budget <= 0 or total / budget < self._compression_threshold:
             return False
 
         system_tokens = self.estimate_tokens(system_prompt)
         recent_budget = budget - system_tokens - TOOL_DEF_OVERHEAD - 200
         if recent_budget <= 0:
-            recent_budget = budget // 4
+            recent_budget = max(1, budget // 4)
 
         kept: list[Message] = []
         used = 0
@@ -202,11 +212,25 @@ class ContextManager:
             used += msg_tokens
 
         removed_count = len(self._messages) - len(kept)
+
+        # Dead-loop guard: if nothing was removed (system+tools already
+        # consume the entire budget), force-keep only the last 2 messages
+        # so we always make forward progress.
         if removed_count <= 0:
-            return False
+            if len(self._messages) <= 2:
+                # Cannot compress further — log and return without mutating.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "ContextManager: cannot compress further (only %d messages remain). "
+                    "Consider increasing max_tokens or reducing system prompt size.",
+                    len(self._messages),
+                )
+                return False
+            kept = self._messages[-2:]
+            removed_count = len(self._messages) - len(kept)
 
         summary = Message(
-            role="user",
+            role="system",
             content=(
                 f"[Context note: {removed_count} earlier messages were summarized to save space. "
                 "The conversation continues below.]"

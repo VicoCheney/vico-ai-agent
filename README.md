@@ -5,16 +5,16 @@
 ## 功能特性
 
 - 🔄 **Agent Loop** — Think → Act → Observe 循环，支持多轮工具调用
-- 📋 **Planning Phase** — 复杂任务先做规划再执行，自动检测并批量调度独立工具调用
+- 📋 **Planning Phase** — 复杂任务前置规划，自动识别并批量调度独立工具调用（通过提示词引导，无独立 Planner LLM 调用）
 - 🔧 **5 个核心工具**：
   - `read` — 读取文件内容，支持行范围
-  - `write` — 创建或覆盖文件（整文件写入，中风险，需确认）
-  - `edit` — 精确字符串替换编辑文件（中风险，需确认）
+  - `write` — 创建或覆盖文件（整文件写入，中风险）
+  - `edit` — 精确字符串替换编辑文件（中风险）
   - `bash` — 执行 Shell 命令（高风险，需确认）
   - `search` — 正则搜索代码（优先使用 ripgrep）
-- 🛡️ **权限控制** — 危险操作前弹出确认框，支持"本次批准 / 本会话始终批准 / 拒绝"
-- 💭 **Thinking 展示** — 实时流式展示模型推理过程
-- 🎨 **终端 UI** — 彩色 Spinner、比例对齐的工具执行行、Markdown 渲染、Plan 面板
+- 🛡️ **权限控制** — 高风险操作前弹出确认框，支持"本次批准 / 本会话始终批准 / 拒绝"
+- 💭 **Thinking 展示** — 实时展示模型推理过程（动态 spinner + 摘要片段）
+- 🎨 **终端 UI** — 彩色 Spinner、比例对齐的工具执行行、Markdown 渲染
 - 🔀 **多 Provider** — 内置 MiMo (Xiaomi) 和 DeepSeek，运行时 `/model` 热切换
 
 ---
@@ -49,7 +49,7 @@ bash setup.sh --help       # 查看所有参数说明
 
 ```bash
 # 1. 安装 Homebrew（如果已有则跳过）
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+/bin/bash -c "$(curl -fsSF https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
 # 2. 安装 Python 3.11+（uv 会自动管理，但需要系统有 curl/git）
 #    macOS 自带的 Python 通常已满足要求，也可以用 Homebrew 安装
@@ -132,7 +132,7 @@ DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 uv run vico
 ```
 
-看到 ASCII Logo 和提示符 `❯` 即表示启动成功，可以开始对话了。
+看到 ASCII Logo 和提示符即表示启动成功，可以开始对话了。
 
 ```
   ██╗   ██╗ ██╗  ██████╗  ██████╗
@@ -144,7 +144,7 @@ uv run vico
 
   All-powerful AI agent assistant · Armed with imagination
 
-❯ 帮我检查一下这个项目有没有 TODO 没完成的
+👤 You: 帮我检查一下这个项目有没有 TODO 没完成的
 ```
 
 ---
@@ -173,16 +173,13 @@ uv tool uninstall vico-ai-agent
 
 ## 执行策略
 
-Vico 采用 **两阶段执行模型** 以减少 LLM 调用次数：
+Vico 采用 **Planning + 批量执行** 模型以减少 LLM 调用次数。
 
-### Phase 0 — Planning（任务规划）
+### Planning Protocol
 
-当用户的请求满足以下任一条件时，Vico 会在执行任何工具之前先调用一次纯规划 LLM（无工具权限），产出结构化的 `<plan>` 块：
+当用户的请求涉及 3 个以上工具调用，或明显是多步任务时，模型会在执行任何工具之前先在内部产出结构化的 `<plan>` 块（内部规划，不展示在终端）。
 
-- 输入包含复杂性关键词（如"体检"、"全面"、"重构"、"部署"等）
-- 输入词数达到一定阈值，看起来是一个多步任务
-
-`<plan>` 块中每个步骤标注 `[batch]`（可并行）或 `[seq]`（顺序依赖），Executor 据此在同一 LLM 轮次内批量发出多个工具调用：
+`<plan>` 块中每个步骤标注 `[batch]`（可并行）或 `[seq]`（顺序依赖），模型据此在同一 LLM 轮次内批量发出多个工具调用：
 
 ```
 Steps:
@@ -191,21 +188,9 @@ Steps:
   3. [seq]   read: config.py  →  edit: config.py
 ```
 
-### Phase 1 — Execution（批量执行）
+### 批量并发执行
 
-Executor 接收到规划后，一次 LLM 调用可以输出多个工具调用（已由底层 `AgentLoop` 支持并发执行），将原来 O(N) 的 LLM round-trips 降低到接近 O(log N)。
-
-### 配置
-
-Planning Phase 可通过 `.vicorc.json` 的 `planning` 字段调整：
-
-```jsonc
-"planning": {
-  "enabled": true,          // 总开关
-  "min_words": 8,           // 触发规划的最低词数
-  "complexity_keywords": [] // 自定义关键词追加（内置关键词不被覆盖）
-}
-```
+AgentLoop 支持在单个 LLM 轮次内并发执行多个工具调用（`asyncio.gather`），将原来 O(N) 的 LLM round-trips 降低到接近 O(log N)。
 
 ---
 
@@ -216,7 +201,8 @@ Planning Phase 可通过 `.vicorc.json` 的 `planning` 字段调整：
 | 命令 | 说明 |
 |------|------|
 | `/help` | 显示帮助和可用命令 |
-| `/model` | 切换 Provider / 模型（运行时热切换） |
+| `/model` | 查看当前 Provider / 模型 |
+| `/model <provider/model>` | 切换 Provider / 模型（运行时热切换）示例：`/model deepseek/deepseek-v4-flash` |
 | `/clear` | 清空对话历史，开启新会话 |
 | `/exit` 或 `Ctrl+D` | 退出 |
 | `Ctrl+C` | 中断当前正在执行的任务（再按一次退出） |
@@ -225,18 +211,20 @@ Planning Phase 可通过 `.vicorc.json` 的 `planning` 字段调整：
 
 ## 权限级别
 
-Vico 在执行工具前会根据风险等级决定是否需要用户确认：
+Vico 在执行工具前会根据风险等级决定是否需要用户确认（由 `.vicorc.json` 的 `tools.auto_approve` 控制）：
 
-| 级别 | 工具 | 行为 |
+| 级别 | 工具 | 默认行为 |
 |------|------|------|
 | `low` | `read`, `search` | 自动执行，无需确认 |
-| `medium` | `write`, `edit` | 弹出权限确认框 |
+| `medium` | `write`, `edit` | 由 `auto_approve` 配置决定 |
 | `high` | `bash` | 弹出权限确认框 |
 
-权限确认框选项：
-- **`y`** 或直接回车 → 本次批准
-- **`a`** → 本会话始终批准（该工具不再询问）
-- **`n`** → 拒绝执行
+> 默认配置 `auto_approve: ["low", "medium"]`，即 `write` / `edit` 也自动执行。如需更严格的保护，可改为 `["low"]`。
+
+权限确认框操作（仅 `high` 风险或未自动批准的工具会显示）：
+- **方向键** 左右选择 `Once` / `Always` / `Deny`
+- **Enter** 确认选择
+- **`Ctrl+C`** 拒绝并中止当前任务
 
 ---
 
@@ -245,11 +233,12 @@ Vico 在执行工具前会根据风险等级决定是否需要用户确认：
 ```
 src/vico/
 ├── core/
-│   ├── types.py                  # 核心类型定义（含 PlanningConfig）
-│   ├── agent_loop.py             # Agent 主循环：Planning → Execute → Observe
+│   ├── types.py                  # 核心类型定义
+│   ├── agent_loop.py             # Agent 主循环：Think → Act → Observe
 │   ├── context_manager.py        # 上下文窗口管理 + Token 压缩
 │   ├── permission_controller.py  # 工具执行权限控制
-│   └── system_prompt.py          # Executor + Planner 两套 Prompt 构建
+│   ├── prompt_loader.py          # Jinja2 系统提示词加载器
+│   └── system_prompt.py          # 系统提示词构建（变量注入）
 ├── llm/
 │   ├── llm_factory.py            # Provider 工厂（读取 .vicorc.json）
 │   ├── models.py                 # 支持的模型注册表
@@ -307,13 +296,8 @@ src/vico/
     "compression_threshold": 0.85  // 触发压缩的使用率阈值
   },
   "tools": {
-    "auto_approve": ["low"],       // 自动批准的风险级别
-    "timeout_ms": 30000            // 工具执行超时（毫秒）
-  },
-  "planning": {
-    "enabled": true,               // Planning Phase 总开关
-    "min_words": 8,                // 触发规划的最低词数
-    "complexity_keywords": []      // 自定义关键词（追加到内置列表）
+    "auto_approve": ["low", "medium"],  // 自动批准的风险级别（low=read/search，medium=write/edit）
+    "timeout_ms": 30000                 // 工具执行超时（毫秒）
   }
 }
 ```

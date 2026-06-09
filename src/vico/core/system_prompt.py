@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import os
 import platform
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -128,29 +127,14 @@ def _get_shell() -> str:
     return os.environ.get("SHELL", "/bin/sh" if platform.system() != "Windows" else "cmd.exe")
 
 
-def _get_git_info(cwd: str) -> str:
-    try:
-        branch = subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=cwd,
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-            text=True,
-        ).strip()
-        status = subprocess.check_output(
-            ["git", "status", "--short"],
-            cwd=cwd,
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-            text=True,
-        ).strip()
-        return f"Git branch: {branch}\nGit status: {status or 'clean'}"
-    except Exception:
-        return "Git: not available"
-
-
 def _make_variables(cwd: str) -> dict[str, str]:
-    """Collect all runtime variables for Jinja2 template rendering."""
+    """Collect all runtime variables for Jinja2 template rendering.
+
+    # Removed _get_git_info() call: it spawned two synchronous subprocess
+    # calls (git rev-parse + git status) blocking the asyncio event loop
+    # for up to 4 seconds on slow/network-mounted repos.  Git context is not
+    # essential for the agent's core operation and has been removed entirely.
+    """
     os_name = platform.system()
     return {
         "OS_NAME": os_name,
@@ -158,7 +142,6 @@ def _make_variables(cwd: str) -> dict[str, str]:
         "SHELL": _get_shell(),
         "CWD": cwd,
         "NOW": datetime.now(UTC).isoformat(),
-        "GIT_INFO": _get_git_info(cwd),
     }
 
 

@@ -73,11 +73,25 @@ class OpenAICompatibleLLM(LLM):
 
         for msg in request.messages:
             if msg.role == "user":
-                content = (
-                    msg.content
-                    if isinstance(msg.content, str)
-                    else "".join(b.text for b in msg.content if hasattr(b, "text"))
-                )
+                # Use isinstance checks instead of hasattr("text") so that
+                # ToolResultBlock (field is "content", not "text") is never
+                # silently dropped.  Unknown block types are logged as a warning.
+                if isinstance(msg.content, str):
+                    content = msg.content
+                else:
+                    import logging as _logging
+                    parts: list[str] = []
+                    for b in msg.content:
+                        if hasattr(b, "text"):
+                            parts.append(b.text)
+                        elif hasattr(b, "content"):
+                            parts.append(b.content)
+                        else:
+                            _logging.getLogger(__name__).warning(
+                                "_build_messages: unknown user content block type %s, skipping",
+                                type(b).__name__,
+                            )
+                    content = "".join(parts)
                 result.append({"role": "user", "content": content})
 
             elif msg.role == "assistant":

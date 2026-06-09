@@ -140,8 +140,12 @@ class SearchTool(Tool):
                 display_output = display_output[:tail]
             truncated = True
 
+        # Recompute displayed line count after truncation so the header
+        # accurately reflects how many results are shown.
+        displayed_count = len(display_output.strip().splitlines()) if truncated else match_count
+
         file_info = f" in {file_pattern}" if file_pattern else ""
-        trunc_info = " (truncated)" if truncated else ""
+        trunc_info = f" (showing {displayed_count} of {match_count})" if truncated else ""
         header = f"Search: {pattern!r}{file_info} — {match_count} matches{trunc_info}\n{'─' * 60}\n"
 
         if truncated:

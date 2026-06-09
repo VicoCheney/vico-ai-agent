@@ -12,7 +12,7 @@ Supported providers:
 from __future__ import annotations
 
 from vico.core.types import LLM, AgentConfig, LLMConfig
-from vico.llm.models import MIMO_MODELS
+from vico.llm.models import DEEPSEEK_MODELS, MIMO_MODELS
 from vico.llm.providers.deepseek import DeepSeekConfig, DeepSeekLLM
 from vico.llm.providers.mimo import MiMoConfig, MiMoLLM
 
@@ -52,6 +52,11 @@ def _build_llm(
     name = provider.lower()
 
     if name == "deepseek":
+        # Validate model against registry (mirrors MiMo's fast-fail check)
+        # so unknown model names are caught at startup instead of at first API call.
+        if model not in DEEPSEEK_MODELS:
+            available = ", ".join(DEEPSEEK_MODELS.keys())
+            raise ValueError(f"Unknown DeepSeek model: {model!r}. Supported models: {available}")
         return DeepSeekLLM(
             DeepSeekConfig(
                 api_key=api_key,

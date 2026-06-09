@@ -425,7 +425,8 @@ async def async_main() -> None:
     async def _approval_cb(
         tool_call: ToolCall,
     ) -> Literal["approve", "approve_always", "deny"]:
-        return await request_approval(tool_call, renderer, session, quit_event, agent._cancel_event)
+        # Use agent.cancel_event (public property) instead of agent._cancel_event
+        return await request_approval(tool_call, renderer, session, quit_event, agent.cancel_event)
 
     callbacks = AgentCallbacks(
         on_thinking=renderer.on_thinking,

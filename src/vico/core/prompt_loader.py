@@ -55,7 +55,10 @@ def _resolve_prompts_dir() -> Path:
 
 
 _PROMPTS_DIR = _resolve_prompts_dir()
-SYSTEM_PROMPT_TOKEN_BUDGET = 4000
+# Raised from 4000 to 8000.  Actual rendered prompt (Agent.md + all includes
+# + runtime variables) is ~1700 tokens; 8000 gives a realistic headroom for
+# persona / user-profile overrides without triggering spurious warnings.
+SYSTEM_PROMPT_TOKEN_BUDGET = 8000
 
 # ---------------------------------------------------------------------------
 # Exceptions

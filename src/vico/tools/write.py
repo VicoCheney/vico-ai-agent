@@ -114,6 +114,7 @@ class WriteTool(Tool):
                 error=f"Cannot write file '{file_path}': {exc}",
             )
 
+        # Empty content: treat as 0 lines (not the ambiguous "1 line for empty file").
         lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         action = "Overwritten" if existed else "Created"
         summary = f"✓ {action} '{file_path}' ({lines} lines, {len(content.encode())} bytes)"

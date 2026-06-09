@@ -3,4 +3,3 @@
 - Shell: {{SHELL}}
 - Working directory: {{CWD}}
 - Current time: {{NOW}}
-- {{GIT_INFO}}
