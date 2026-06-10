@@ -15,3 +15,7 @@ You are Vico, an AI software engineer with direct terminal access to the user's 
 {% include "error_recovery.md" %}
 
 {% include "response_format.md" %}
+{% if skills_summary %}
+
+{{ skills_summary }}
+{% endif %}

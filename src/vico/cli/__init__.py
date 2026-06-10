@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 from collections.abc import Callable
 from typing import Literal
@@ -20,26 +21,29 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 
+from vico.cli import theme as theme
 from vico.cli.renderer import TerminalRenderer
+from vico.cli.session import VicoSession
 from vico.config import load_config, lookup_provider
-from vico.core.agent_loop import AgentCallbacks, AgentLoop
-from vico.core.context_manager import ContextManager
+from vico.core.agent_loop import AgentLoop
 from vico.core.permission_controller import PermissionController
 from vico.core.types import AgentConfig, LLMConfig, ToolCall
+from vico.exceptions import VicoError
 from vico.llm.llm_factory import create_llm_from_config
-from vico.tools import BUILTIN_TOOLS
-from vico.tools.registry import ToolRegistry
+from vico.skills.loader import SkillLoader
 
 console = Console()
 
-_RESET = "\033[0m"
-_DIM = "\033[2m"
-_BOLD = "\033[1m"
-_BRIGHT_BLK = "\033[90m"
-_WHITE_BOLD = "\033[1;37m"
+__all__ = [
+    "async_main",
+    "main",
+    "request_approval",
+    "repl",
+    "VicoSession",
+]
 
-_PROMPT_STR = ANSI(f"\n{_BRIGHT_BLK}👤 You: {_RESET}")
-_PROMPT_CONT = ANSI(f"{_BRIGHT_BLK}         {_RESET}")  # continuation indent (9 spaces, aligns with "You: ")
+_PROMPT_STR = ANSI(f"\n{theme.DIM}👤 You: {theme.RESET}")
+_PROMPT_CONT = ANSI(f"{theme.DIM}         {theme.RESET}")  # continuation indent
 
 
 # ─── Ctrl+C key binding for prompt-toolkit ───────────────────────────────────
@@ -49,15 +53,7 @@ def _make_prompt_key_bindings(
     quit_event: asyncio.Event,
     cancel_event: asyncio.Event | None = None,
 ) -> KeyBindings:
-    """Build key bindings for the multiline input prompt.
-
-    Submit keys  : Enter (always submits immediately).
-    Newline keys : Alt+Enter, Escape→Enter, or Ctrl+J (insert a literal newline).
-    Cancel key   : Ctrl+C exits / cancels the current run.
-
-    This matches the convention used by Claude Code, Gemini CLI, Codex CLI,
-    Slack, and most modern chat interfaces: Enter = send, Alt+Enter = newline.
-    """
+    """Build key bindings: Enter = submit, Alt+Enter/Ctrl+J = newline, Ctrl+C = cancel."""
     kb = KeyBindings()
 
     @kb.add("c-c")
@@ -69,13 +65,11 @@ def _make_prompt_key_bindings(
 
     @kb.add("enter")
     def _submit(event):  # type: ignore[no-untyped-def]
-        """Enter: always submit the buffer."""
         event.app.current_buffer.validate_and_handle()
 
     @kb.add("escape", "enter", eager=True)
     @kb.add("c-j")
     def _newline(event):  # type: ignore[no-untyped-def]
-        """Alt+Enter or Ctrl+J: insert a literal newline without submitting."""
         event.app.current_buffer.insert_text("\n")
 
     return kb
@@ -161,8 +155,6 @@ async def _run_selector(
         key_bindings=kb,
         full_screen=False,
         refresh_interval=None,
-        # Erase the selector widget when the app exits so the summary line
-        # written by collapse_permission_request() lands in the correct position.
         erase_when_done=True,
     )
 
@@ -208,8 +200,6 @@ async def request_approval(
 
 
 def print_help() -> None:
-    import shutil
-
     w = shutil.get_terminal_size(fallback=(80, 24)).columns
     div = f"[dim]{'─' * w}[/dim]"
     console.print()
@@ -220,6 +210,8 @@ def print_help() -> None:
         ("/clear", "Clear conversation history"),
         ("/model", "Show current provider & model"),
         ("/model <p/m>", "Switch model  e.g. deepseek/deepseek-v4-pro"),
+        ("/skills", "List all available skills"),
+        ("/skill <id>", "Manually activate a skill by its ID"),
         ("/help", "Show this message"),
         ("/exit", "Exit Vico"),
     ]
@@ -230,6 +222,7 @@ def print_help() -> None:
     tips = [
         "Vico can read files, search code, and run shell commands",
         "High-risk commands require your approval before running",
+        "Place SKILL.md files in .vico/skills/<name>/ to add custom skills",
         "Enter to send · Alt+Enter or Ctrl+J to insert a newline",
         "Ctrl+C during response to stop  ·  Ctrl+C when idle to exit",
     ]
@@ -237,6 +230,52 @@ def print_help() -> None:
         console.print(f"  [dim]•  {tip}[/dim]")
     console.print(div)
     console.print()
+
+
+# ─── /skills command ──────────────────────────────────────────────────────────
+
+
+def _handle_skills_command(skill_loader: SkillLoader) -> None:
+    w = shutil.get_terminal_size(fallback=(80, 24)).columns
+    div = f"[dim]{'─' * w}[/dim]"
+
+    metas = [m for m in skill_loader.get_all_metas() if m.user_invocable]
+    if not metas:
+        console.print()
+        console.print("  [dim]No skills found.[/dim]")
+        console.print("  [dim]Place SKILL.md files in [cyan].vico/skills/<name>/[/cyan] to add skills.[/dim]")
+        console.print()
+        return
+
+    console.print()
+    console.print(div)
+    console.print("[bold]  Available Skills[/bold]")
+    console.print(div)
+    for meta in metas:
+        hint = f" [dim]{meta.argument_hint}[/dim]" if meta.argument_hint else ""
+        lock = " [yellow](manual only)[/yellow]" if meta.disable_model_invocation else ""
+        cmd = f"/skill {meta.skill_id}{hint}"
+        desc_line = meta.description.splitlines()[0] if meta.description else ""
+        console.print(f"  [cyan]{cmd:<28}[/cyan]{lock}  [dim]{desc_line}[/dim]")
+    console.print(div)
+    console.print()
+
+
+def _handle_skill_command(user_input: str, agent: AgentLoop, skill_loader: SkillLoader) -> None:
+    parts = user_input.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        console.print("  [dim]Usage: /skill <skill-id>[/dim]")
+        _handle_skills_command(skill_loader)
+        return
+
+    skill_id = parts[1].strip()
+    ok = agent.inject_skill_by_id(skill_id)
+    if ok:
+        console.print(f"  [green]✓[/green]  Skill [cyan]{skill_id}[/cyan] loaded into context.")
+        console.print("  [dim]The skill instructions are now available for the next message.[/dim]")
+    else:
+        console.print(f"  [red]✗[/red]  Skill not found: [cyan]{skill_id}[/cyan]")
+        _handle_skills_command(skill_loader)
 
 
 # ─── /model command ───────────────────────────────────────────────────────────
@@ -270,7 +309,7 @@ def _handle_model_command(
 
     try:
         provider_config = lookup_provider(provider)
-    except ValueError as e:
+    except VicoError as e:
         console.print(f"  [red]✗[/red]  {e}")
         return
 
@@ -291,7 +330,7 @@ def _handle_model_command(
                 temperature=config.llm.temperature,
             )
         )
-    except ValueError as e:
+    except VicoError as e:
         console.print(f"  [red]✗[/red]  {e}")
         return
 
@@ -317,6 +356,7 @@ async def repl(
     quit_event: asyncio.Event,
     config: AgentConfig,
     permissions: PermissionController,
+    skill_loader: SkillLoader | None = None,
 ) -> None:
     """Interactive REPL loop."""
     prompt_kb = _make_prompt_key_bindings(quit_event)
@@ -373,10 +413,16 @@ async def repl(
             _handle_model_command(user_input, agent, renderer, config, permissions)
             continue
 
-        # ── Run the agent ─────────────────────────────────────────────────────
+        if user_input == "/skills" and skill_loader:
+            _handle_skills_command(skill_loader)
+            continue
+
+        if user_input.startswith("/skill ") and skill_loader:
+            _handle_skill_command(user_input, agent, skill_loader)
+            continue
+
+        # Run the agent
         renderer.reset_output_state()
-        # Show the waiting spinner immediately so there's no blank period
-        # between the user pressing Enter and the first LLM token arriving.
         renderer.start_waiting()
         run_task: asyncio.Task[None] = asyncio.create_task(agent.run(user_input, max_iterations=30))
         aborted = False
@@ -388,11 +434,6 @@ async def repl(
                 return
             aborted = True
             agent.cancel()
-            # Cancel the task unconditionally so that `await run_task` below
-            # always unblocks — regardless of whether the agent is running a
-            # bash command, waiting for an approval dialog, or streaming LLM
-            # output.  Without this, pressing Ctrl+C during a long bash
-            # execution left the repl stuck forever at `await run_task`.
             run_task.cancel()
             quit_event.set()
 
@@ -419,66 +460,14 @@ async def repl(
 
 
 async def async_main() -> None:
-    loop = asyncio.get_running_loop()
-
     try:
         config = load_config(cwd=os.getcwd())
-    except ValueError as exc:
+    except (ValueError, VicoError) as exc:
         console.print(f"\n[bold red]Configuration Error:[/bold red] {exc}\n")
         raise SystemExit(1) from exc
 
-    renderer = TerminalRenderer()
-    renderer.set_model_label(config.llm.provider, config.llm.model)
-    renderer.set_cwd(config.cwd)
-
-    quit_event = asyncio.Event()
-    session: PromptSession[str] = PromptSession()
-
-    tool_registry = ToolRegistry()
-    tool_registry.register_all(BUILTIN_TOOLS)
-
-    llm = create_llm_from_config(config)
-
-    context = ContextManager(
-        max_tokens=config.context.max_tokens,
-        reserve_tokens=config.context.reserve_tokens,
-        compression_threshold=config.context.compression_threshold,
-    )
-    permissions = PermissionController(auto_approve_risks=config.tools.auto_approve)
-
-    # Wire a permissions checker into the renderer so that on_tool_call() can
-    # decide whether to show a spinner line or wait for the approval dialog.
-    renderer.set_permissions_checker(lambda tc: permissions.is_auto_approved(tc, tool_registry))
-
-    async def _approval_cb(
-        tool_call: ToolCall,
-    ) -> Literal["approve", "approve_always", "deny"]:
-        # Use agent.cancel_event (public property) instead of agent._cancel_event
-        return await request_approval(tool_call, renderer, session, quit_event, agent.cancel_event)
-
-    callbacks = AgentCallbacks(
-        on_thinking=renderer.on_thinking,
-        on_text=renderer.on_text,
-        on_tool_call=renderer.on_tool_call,
-        on_tool_result=renderer.on_tool_result,
-        on_error=renderer.on_error,
-        on_done=lambda pt, ct: renderer.on_done_with_usage(pt, ct),
-        on_loop=renderer.on_loop,
-        request_approval=_approval_cb,
-    )
-
-    agent = AgentLoop(
-        llm=llm,
-        context=context,
-        tool_registry=tool_registry,
-        permissions=permissions,
-        config=config,
-        callbacks=callbacks,
-    )
-
-    renderer.print_welcome()
-
-    await repl(agent, renderer, session, loop, quit_event, config, permissions)
+    session = VicoSession(config)
+    await session.run()
 
 
 def main() -> None:

@@ -1,17 +1,15 @@
-"""
-Context Manager
-"""
+"""Context Manager — manages conversation context within a token budget."""
 
 from __future__ import annotations
 
 import logging
 import time
 import uuid
-from dataclasses import dataclass
 from typing import Any
 
 from vico.core.types import (
     ContentBlock,
+    ContextStats,
     Message,
     TextBlock,
     TokenUsage,
@@ -22,19 +20,9 @@ from vico.utils.text_utils import estimate_tokens as _estimate_tokens
 
 logger = logging.getLogger(__name__)
 
-TOOL_DEF_OVERHEAD = 3000  # estimated tokens for tool definitions
-# OpenAI chat message formatting overhead per message (role + delimiter tokens).
-# See: https://platform.openai.com/docs/guides/chat/introduction
-_MSG_OVERHEAD_TOKENS = 4
-
-
-@dataclass
-class ContextStats:
-    message_count: int
-    estimated_tokens: int
-    max_tokens: int
-    usage_percent: float
-    is_near_limit: bool
+TOOL_DEF_OVERHEAD = 3000  # ~5 tools × ~600 tokens each
+_MSG_OVERHEAD_TOKENS = 4  # per-message role/delimiter overhead
+_COMPRESSION_SAFETY_MARGIN = 200  # headroom for the summary message itself
 
 
 class ContextManager:
@@ -66,7 +54,7 @@ class ContextManager:
     def add_assistant_message(
         self,
         text: str,
-        tool_calls: list[dict[str, Any]] | None = None,  # [{id, name, input}]
+        tool_calls: list[dict[str, Any]] | None = None,
     ) -> None:
         blocks: list[ContentBlock] = []
         if text:
@@ -74,7 +62,6 @@ class ContextManager:
         for tc in tool_calls or []:
             blocks.append(ToolUseBlock(id=tc["id"], name=tc["name"], input=tc["input"]))
 
-        # Store as plain string when there are no tool calls
         content: str | list[ContentBlock]
         if len(blocks) == 1 and isinstance(blocks[0], TextBlock):
             content = text
@@ -93,7 +80,7 @@ class ContextManager:
     def add_tool_result(
         self,
         tool_use_id: str,
-        tool_name: str,  # kept for symmetry / logging
+        tool_name: str,
         content: str,
         is_error: bool = False,
     ) -> None:
@@ -121,11 +108,6 @@ class ContextManager:
     # ─── Token Estimation ─────────────────────────────────────────────
 
     def estimate_tokens(self, text: str) -> int:
-        """Estimate token count, accounting for CJK characters.
-
-        Delegates to the shared ``text_utils.estimate_tokens`` so that
-        ContextManager and PromptLoader always use identical logic.
-        """
         return _estimate_tokens(text)
 
     def estimate_message_tokens(self, msg: Message) -> int:
@@ -153,21 +135,9 @@ class ContextManager:
     def maybe_compress(self, system_prompt: str) -> bool:
         """Compress context if approaching the token limit.
 
-        Keeps recent messages by walking backwards and accumulating token
-        estimates until the budget is consumed.
-
-        To avoid violating user/assistant alternation rules, the summary
-        message is inserted using role="system" (supported by all OpenAI-
-        compatible providers and does not count against alternation rules).
-
+        Walks backwards keeping recent messages within budget. Uses role="system"
+        for the summary message to avoid violating user/assistant alternation rules.
         Returns True if compression occurred.
-
-        Guard against dead-loop: when system+tools already exceed the
-        # budget, kept may equal self._messages (removed_count==0).  We now
-        # force-drop all but the last 2 messages in that case so compression
-        # always makes progress.  Also switched summary role from "user" to
-        # "system" to avoid producing consecutive user messages when the
-        # first kept message is already a user turn.
         """
         total = self.estimate_total_tokens(system_prompt)
         budget = self._max_tokens - self._reserve_tokens
@@ -176,7 +146,7 @@ class ContextManager:
             return False
 
         system_tokens = self.estimate_tokens(system_prompt)
-        recent_budget = budget - system_tokens - TOOL_DEF_OVERHEAD - 200
+        recent_budget = budget - system_tokens - TOOL_DEF_OVERHEAD - _COMPRESSION_SAFETY_MARGIN
         if recent_budget <= 0:
             recent_budget = max(1, budget // 4)
 
@@ -191,15 +161,11 @@ class ContextManager:
 
         removed_count = len(self._messages) - len(kept)
 
-        # Dead-loop guard: if nothing was removed (system+tools already
-        # consume the entire budget), force-keep only the last 2 messages
-        # so we always make forward progress.
+        # Dead-loop guard: if nothing was removed, force-keep only the last 2 messages.
         if removed_count <= 0:
             if len(self._messages) <= 2:
-                # Cannot compress further — log and return without mutating.
                 logger.warning(
-                    "ContextManager: cannot compress further (only %d messages remain). "
-                    "Consider increasing max_tokens or reducing system prompt size.",
+                    "ContextManager: cannot compress further (%d messages remain).",
                     len(self._messages),
                 )
                 return False
@@ -235,7 +201,7 @@ class ContextManager:
 
     @staticmethod
     def _gen_id() -> str:
-        return uuid.uuid4().hex[:8]
+        return uuid.uuid4().hex[:12]
 
     @staticmethod
     def _now_ms() -> int:

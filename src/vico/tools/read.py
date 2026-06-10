@@ -16,18 +16,21 @@ from pathlib import Path
 from typing import Any
 
 from vico.core.types import (
-    Tool,
     ToolDefinition,
     ToolExecutionContext,
     ToolParameterSchema,
     ToolResult,
     ToolRiskLevel,
 )
+from vico.tools.base import Tool
+from vico.utils.terminal import terminal_width as _terminal_width
 
 MAX_CHARS = 40_000  # ~10K tokens max per read
 
 
 class ReadTool(Tool):
+    """Read file contents with optional line-range filtering. Risk level: low."""
+
     @property
     def risk_level(self) -> ToolRiskLevel:
         return "low"
@@ -68,7 +71,6 @@ class ReadTool(Tool):
         raw_path = str(params["path"])
         file_path = Path(os.path.join(context.cwd, raw_path)).resolve()
 
-        # Block path traversal: os.path.join ignores cwd when raw_path is absolute.
         cwd_path = Path(context.cwd).resolve()
         if not file_path.is_relative_to(cwd_path):
             return ToolResult(
@@ -109,7 +111,7 @@ class ReadTool(Tool):
         if start_line or end_line:
             range_info = f" (lines {start_line or 1}–{end_line or 'end'})"
 
-        header = f"File: {file_path}{range_info}\n{'─' * 60}\n"
+        header = f"File: {file_path}{range_info}\n{'─' * _terminal_width()}\n"
         footer = "\n\n[... file truncated. Use start_line/end_line to read more ...]" if truncated else ""
 
         return ToolResult(

@@ -18,20 +18,20 @@ from pathlib import Path
 from typing import Any
 
 from vico.core.types import (
-    Tool,
     ToolDefinition,
     ToolExecutionContext,
     ToolParameterSchema,
     ToolResult,
     ToolRiskLevel,
 )
+from vico.tools.base import Tool
 
 MAX_RESULTS = 50
 MAX_OUTPUT_CHARS = 12_000
 
-# Cache the ripgrep availability check at module load time — the result is
-# stable for the lifetime of the process and shutil.which() does file-system
-# lookups that are wasteful to repeat on every search call.
+# Timeout for external search commands (ripgrep / grep) in seconds.
+_SEARCH_TIMEOUT_S = 15
+
 _RG_PATH: str | None = shutil.which("rg")
 
 
@@ -40,6 +40,8 @@ def _has_ripgrep() -> bool:
 
 
 class SearchTool(Tool):
+    """Search files for regex patterns using ripgrep. Risk level: low."""
+
     @property
     def risk_level(self) -> ToolRiskLevel:
         return "low"
@@ -94,6 +96,17 @@ class SearchTool(Tool):
         search_path = (
             Path(os.path.join(context.cwd, str(params["path"]))).resolve() if "path" in params else Path(context.cwd)
         )
+
+        cwd_path = Path(context.cwd).resolve()
+        if not search_path.is_relative_to(cwd_path):
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    f"Access denied: '{search_path}' is outside the working directory "
+                    f"'{cwd_path}'. Only files within the project root can be searched."
+                ),
+            )
         file_pattern: str | None = str(params["file_pattern"]) if "file_pattern" in params else None
         case_sensitive = bool(params.get("case_sensitive", False))
         max_results = int(params.get("max_results", MAX_RESULTS))
@@ -145,8 +158,6 @@ class SearchTool(Tool):
                 display_output = display_output[:tail]
             truncated = True
 
-        # Recompute displayed line count after truncation so the header
-        # accurately reflects how many results are shown.
         displayed_count = len(display_output.strip().splitlines()) if truncated else match_count
 
         file_info = f" in {file_pattern}" if file_pattern else ""
@@ -197,7 +208,6 @@ class SearchTool(Tool):
                 cmd.extend(["--glob", file_pattern])
             cmd.extend([pattern, search_path])
         else:
-            # grep -m limits per-file; use head after to enforce a global cap.
             cmd = ["grep", "-rn"]
             if not case_sensitive:
                 cmd.append("-i")
@@ -211,12 +221,11 @@ class SearchTool(Tool):
             cwd=cwd,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=_SEARCH_TIMEOUT_S,
             check=True,
         )
         raw_output = result.stdout
 
-        # Enforce global max_results cap (rg/grep both apply limits per-file).
         lines = raw_output.splitlines(keepends=True)
         if len(lines) > max_results:
             lines = lines[:max_results]

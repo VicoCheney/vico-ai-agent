@@ -66,7 +66,9 @@ CLI REPL (__init__.py)
 ```
 
 **关键开发约定**：
-- 新类型 / DataClass / Config → 统一放 `src/vico/core/types.py`
+- 跨模块共享的数据契约（两个及以上模块依赖）→ `src/vico/core/types.py`
+  - 例：`Message`、`ToolCall`、`AgentConfig`、`AgentCallbacks`、`SkillMeta`
+  - **不属于此处**：仅单个模块内部使用的配置类（如 `DeepSeekConfig`、`MiMoConfig`），应放在该模块自己的文件中
 - 新工具 → 继承 `Tool` 抽象基类，放 `src/vico/tools/<name>.py`，在 `tools/__init__.py` 的 `BUILTIN_TOOLS` 追加实例
 - 新 CLI 命令 → 在 `src/vico/cli/__init__.py` 命令分发处添加
 - 配置扩展 → 新增字段到 `AgentConfig`（types.py），同步更新 `.vicorc.json` 示例和 `README.md`

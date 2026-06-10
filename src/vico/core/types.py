@@ -6,12 +6,13 @@ These dataclasses define the foundational contracts shared by all modules.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
-from abc import ABC, abstractmethod
 from asyncio import Event
-from collections.abc import AsyncIterator
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -57,7 +58,7 @@ class TokenUsage:
 class Message:
     role: MessageRole
     content: str | list[ContentBlock]
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     timestamp: int = field(default_factory=lambda: time.time_ns() // 1_000_000)
     usage: TokenUsage | None = None
 
@@ -125,25 +126,6 @@ class ToolResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class Tool(ABC):
-    """Abstract base class for all tools."""
-
-    @property
-    @abstractmethod
-    def definition(self) -> ToolDefinition: ...
-
-    @property
-    @abstractmethod
-    def risk_level(self) -> ToolRiskLevel: ...
-
-    @abstractmethod
-    async def execute(
-        self,
-        params: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolResult: ...
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool Call / Stream Chunk Types
 # ─────────────────────────────────────────────────────────────────────────────
@@ -209,26 +191,6 @@ class LLMRequest:
     response_format: str | None = None  # "text" | "json_object"
 
 
-class LLM(ABC):
-    """Abstract base class for all LLM instances (provider + model + config)."""
-
-    @property
-    @abstractmethod
-    def name(self) -> str: ...
-
-    @abstractmethod
-    def stream(self, request: LLMRequest) -> AsyncIterator[StreamChunk]: ...
-
-    @abstractmethod
-    def get_max_context_tokens(self) -> int: ...
-
-    @abstractmethod
-    def supports_tool_use(self) -> bool: ...
-
-    @abstractmethod
-    def supports_vision(self) -> bool: ...
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Agent Config
 # ─────────────────────────────────────────────────────────────────────────────
@@ -238,9 +200,9 @@ class LLM(ABC):
 class LLMConfig:
     provider: str = "mimo"
     api_key: str = ""
-    base_url: str = "https://api.xiaomimimo.com/v1"
+    base_url: str = "https://token-plan-sgp.xiaomimimo.com/v1"
     model: str = "mimo-v2.5-pro"
-    max_tokens: int = 131072
+    max_tokens: int = 131072  # matches DEFAULT_MAX_TOKENS in config.py
     temperature: float = 1.0
     top_p: float | None = None
     stop: list[str] | None = None
@@ -263,6 +225,18 @@ class ContextConfig:
 class ToolsConfig:
     auto_approve: list[ToolRiskLevel] = field(default_factory=lambda: ["low"])
     timeout_ms: int = 30000
+    # Environment variable pass-through to child processes.
+    # When non-empty, only listed variables (and VICO_* prefixed ones) are passed.
+    # When empty (default), the full os.environ is passed (legacy behaviour).
+    # Users should set this in .vicorc.json for production use.
+    env_whitelist: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AgentLimits:
+    """Configurable safety limits for the agent loop."""
+
+    max_iterations: int = 30  # Maximum tool-use iterations per user message
 
 
 @dataclass
@@ -270,7 +244,8 @@ class AgentConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
-    cwd: str = field(default_factory=lambda: __import__("os").getcwd())
+    limits: AgentLimits = field(default_factory=AgentLimits)
+    cwd: str = field(default_factory=os.getcwd)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -278,3 +253,91 @@ class AgentConfig:
 # ─────────────────────────────────────────────────────────────────────────────
 
 AgentState = Literal["idle", "running", "waiting_approval", "error", "done"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Skill Types
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class SkillMeta:
+    """Parsed from SKILL.md frontmatter — lightweight, always in memory."""
+
+    skill_id: str            # Directory name, used as unique identifier
+    name: str                # Human-readable display name
+    description: str         # Short description for model discovery (shown in system prompt JSON)
+    argument_hint: str = ""  # Shown in /skills list, e.g. "[file-or-dir]"
+    disable_model_invocation: bool = False  # If True, model cannot self-activate this skill
+    user_invocable: bool = True             # If False, hidden from /skills list
+    skill_dir: Path = field(default_factory=Path)
+
+
+@dataclass
+class SkillContent:
+    """Full skill content — loaded on demand when a skill is activated."""
+
+    meta: SkillMeta
+    body: str  # Everything in SKILL.md below the frontmatter delimiter
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM Provider Config Types
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ModelInfo:
+    """Static metadata about a specific model."""
+
+    name: str
+    display_name: str
+    max_context_tokens: int
+    max_output_tokens: int
+    supports_tool_use: bool = True
+    supports_vision: bool = False
+    supports_reasoning: bool = False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Context Stats
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ContextStats:
+    message_count: int
+    estimated_tokens: int
+    max_tokens: int
+    usage_percent: float
+    is_near_limit: bool
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent Callback Types
+# ─────────────────────────────────────────────────────────────────────────────
+
+OnThinkingCallback = Callable[[str], None]
+OnTextCallback = Callable[[str], None]
+OnToolCallCallback = Callable[["ToolCall"], None]
+OnToolResultCallback = Callable[["ToolCall", "ToolResult"], None]
+OnErrorCallback = Callable[[Exception], None]
+OnDoneCallback = Callable[[int, int], None]   # prompt_tokens, completion_tokens
+OnLoopCallback = Callable[[int], None]
+OnSkillActivatedCallback = Callable[["SkillMeta"], None]
+ApprovalCallback = Callable[["ToolCall"], "Coroutine[Any, Any, Literal['approve', 'approve_always', 'deny']]"]
+
+
+@dataclass
+class AgentCallbacks:
+    """All event callbacks from the agent loop to the UI."""
+
+    on_thinking: OnThinkingCallback | None = None
+    on_text: OnTextCallback | None = None
+    on_tool_call: OnToolCallCallback | None = None
+    on_tool_result: OnToolResultCallback | None = None
+    on_error: OnErrorCallback | None = None
+    on_done: OnDoneCallback | None = None
+    on_loop: OnLoopCallback | None = None
+    on_skill_activated: OnSkillActivatedCallback | None = None
+    request_approval: ApprovalCallback | None = None

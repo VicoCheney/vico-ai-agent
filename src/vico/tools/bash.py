@@ -1,16 +1,14 @@
 """
 bash — Execute a shell command in the working directory.
 
-Returns combined stdout+stderr output. Enforces a hard output truncation limit
-so large command output does not blow up the context window.
+Returns combined stdout+stderr. Enforces a hard output truncation limit
+to prevent large output from blowing up the context window.
 
 Safety:
-  - Blocks commands that require interactive TTY input (sudo, ssh, passwd, etc.)
-    as they will hang the agent waiting for a password or keystroke.
-  - Runs each command in its own process group so the entire tree can be killed
-    cleanly on timeout or cancellation.
+  - Blocks commands requiring interactive TTY input (sudo, ssh, passwd, etc.)
+  - Runs each command in its own process group for clean kill on timeout/cancel.
 
-Risk level: HIGH — can modify system state; requires user approval by default.
+Risk level: HIGH — requires user approval by default.
 """
 
 from __future__ import annotations
@@ -24,20 +22,19 @@ from pathlib import Path
 from typing import Any
 
 from vico.core.types import (
-    Tool,
     ToolDefinition,
     ToolExecutionContext,
     ToolParameterSchema,
     ToolResult,
     ToolRiskLevel,
 )
+from vico.tools.base import Tool
+from vico.utils.terminal import terminal_width as _terminal_width
 
 MAX_OUTPUT_CHARS = 30_000
-# Read stdout in 64 KiB chunks to bound memory usage while streaming output.
-# Smaller values increase syscall overhead; larger values delay OOM-kill reaction.
-_READ_CHUNK_SIZE = 65_536
+_READ_CHUNK_SIZE = 65_536  # 64 KiB — bounds memory while streaming output
 
-# Commands that may request interactive TTY input (read /dev/tty directly and will hang).
+# Commands that read /dev/tty directly and will hang waiting for user input.
 _INTERACTIVE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bsudo\b"),
     re.compile(r"\bsu\b"),
@@ -50,31 +47,17 @@ _INTERACTIVE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bpsql\b.*-p(?!\S)"),
 ]
 
-
-# Wrappers that defeat naive word-boundary checks (e.g. `bash -c 'sudo …'`,
-# `sh -c "sudo …"`, `eval 'sudo …'`, `$(sudo …)`, `` `sudo …` ``).  We
-# unwrap any quoted/eval'd payload inside these and re-scan the inner text.
+# Shell wrappers that can smuggle interactive commands past word-boundary checks.
 _WRAPPER_PATTERNS: list[re.Pattern[str]] = [
-    # bash -c "..."   /   sh -c '...'   /   zsh -c "..."
     re.compile(r"""(?:^|[\s;&|])(?:bash|sh|zsh|dash|ksh)\s+-c\s+(['"])(.*?)\1""", re.DOTALL),
-    # eval "..."  /  eval '...'
     re.compile(r"""\beval\s+(['"])(.*?)\1""", re.DOTALL),
-    # $(...)  command substitution
     re.compile(r"\$\((.*?)\)", re.DOTALL),
-    # `...`   backtick substitution
     re.compile(r"`([^`]*)`"),
 ]
 
 
 def _expand_wrappers(command: str, depth: int = 0) -> str:
-    """Recursively pull the *content* out of common shell wrappers.
-
-    Returns a flat string that contains every payload, so a single regex pass
-    over the result will catch `sudo` even when it's hidden in
-    ``bash -c "sudo apt update"``.
-
-    Depth-limited to defend against pathological inputs.
-    """
+    """Recursively extract the payload from shell wrappers (depth-limited to 4)."""
     if depth > 4:
         return command
     expanded = command
@@ -89,25 +72,19 @@ def _expand_wrappers(command: str, depth: int = 0) -> str:
 
 
 def _is_interactive_command(command: str) -> tuple[bool, str]:
-    """Return (True, reason) if the command is likely to block waiting for TTY input.
-
-    Scans both the literal command **and** any payload smuggled inside
-    ``bash -c "..."`` / ``eval`` / ``$(...)`` / backtick wrappers, so the
-    common bypass tricks no longer slip past the guardrail.
-    """
-    normalized = command.strip()
-    haystack = _expand_wrappers(normalized)
+    """Return (True, reason) if the command would block waiting for TTY input."""
+    haystack = _expand_wrappers(command.strip())
     for pat in _INTERACTIVE_PATTERNS:
         if pat.search(haystack):
             return (
                 True,
-                f"Command contains a pattern matching '{pat.pattern}' which may require interactive TTY input (password prompt). Use a non-privileged or non-interactive alternative.",
+                f"Command matches '{pat.pattern}' which may require interactive TTY input.",
             )
     return False, ""
 
 
 def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
-    """Kill the process and its entire process group to avoid orphan children."""
+    """Kill the process and its entire process group to avoid orphaned children."""
     try:
         if sys.platform != "win32":
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
@@ -121,6 +98,8 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
 
 
 class BashTool(Tool):
+    """Execute a shell command and return combined stdout + stderr. Risk level: high."""
+
     @property
     def risk_level(self) -> ToolRiskLevel:
         return "high"
@@ -171,7 +150,7 @@ class BashTool(Tool):
                     output="",
                     error=(
                         f"Access denied: cwd '{cwd_path}' is outside the project root "
-                        f"'{project_root}'. Only directories within the project root are allowed."
+                        f"'{project_root}'."
                     ),
                 )
             cwd = str(cwd_path)
@@ -183,9 +162,6 @@ class BashTool(Tool):
 
         is_interactive, reason = _is_interactive_command(command)
         if is_interactive:
-            # Provide actionable guidance so the LLM can self-degrade:
-            #   - Try a non-privileged alternative command
-            #   - Or ask the user to run the command manually in their terminal
             if re.search(r"\bsudo\b", command):
                 error = (
                     "BLOCKED: `sudo` is not allowed (cannot accept password input). "
@@ -206,8 +182,7 @@ class BashTool(Tool):
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                # start_new_session=True gives the shell a dedicated process group
-                # so os.killpg() kills the whole tree on timeout or cancellation.
+                # Dedicated process group for clean whole-tree kill.
                 start_new_session=True,
             )
         except OSError as exc:
@@ -217,23 +192,8 @@ class BashTool(Tool):
                 error=f"Failed to spawn command: {exc}",
             )
 
-        # ── Streaming read with OOM guard ────────────────────────────────────
-        # Instead of communicate() (which buffers all output in memory before
-        # returning), we read stdout in small chunks and kill the process as
-        # soon as the output budget is exhausted.  This prevents a runaway
-        # command (e.g. `cat /dev/urandom`, `yes`, a 5 GB log grep) from
-        # silently inflating the agent's RSS until the OS OOM-kills it.
-        #
-        # Concurrency model:
-        #   read_task   — streams stdout chunks until EOF or budget exceeded
-        #   cancel_waiter_task — fires when context.cancel_event is set
-        #   asyncio.wait(timeout=…) — enforces the caller-supplied timeout
-        #
-        # All three are raced with asyncio.wait(FIRST_COMPLETED); whichever
-        # wins causes the other two to be cancelled and the process tree to
-        # be killed.
-        # ─────────────────────────────────────────────────────────────────────
-
+        # Stream stdout in chunks to bound memory usage.
+        # Race read_task vs cancel_waiter_task vs timeout.
         output_chunks: list[str] = []
         timed_out = False
         output_bytes = 0
@@ -241,7 +201,6 @@ class BashTool(Tool):
         cancel_event = context.cancel_event
 
         async def _read_stream() -> None:
-            """Read stdout until EOF or the output budget is exhausted."""
             nonlocal output_bytes
             assert process.stdout is not None
             while True:
@@ -252,8 +211,6 @@ class BashTool(Tool):
                 output_chunks.append(decoded)
                 output_bytes += len(decoded)
                 if output_bytes >= MAX_OUTPUT_CHARS:
-                    # Budget exceeded — kill the process immediately so it
-                    # stops producing output and consuming CPU/disk.
                     _kill_process_tree(process)
                     break
 
@@ -267,8 +224,6 @@ class BashTool(Tool):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Always disarm the cancel-waiter to prevent a dangling task from
-            # keeping the event loop alive after this coroutine returns.
             if not cancel_waiter_task.done():
                 cancel_waiter_task.cancel()
                 try:
@@ -277,7 +232,6 @@ class BashTool(Tool):
                     pass
 
             if not done:
-                # Timeout: kill the process tree and drain the read task.
                 timed_out = True
                 _kill_process_tree(process)
                 read_task.cancel()
@@ -286,7 +240,6 @@ class BashTool(Tool):
                 except (asyncio.CancelledError, Exception):
                     pass
             elif cancel_event.is_set() and not read_task.done():
-                # Explicit cancellation by the caller.
                 _kill_process_tree(process)
                 read_task.cancel()
                 try:
@@ -294,9 +247,6 @@ class BashTool(Tool):
                 except (asyncio.CancelledError, Exception):
                     pass
             else:
-                # Normal completion or budget-exceeded (process already killed
-                # inside _read_stream).  Await the read task to propagate any
-                # unexpected exceptions.
                 try:
                     await read_task
                 except (asyncio.CancelledError, Exception):
@@ -308,7 +258,6 @@ class BashTool(Tool):
             if not cancel_waiter_task.done():
                 cancel_waiter_task.cancel()
 
-        # Wait for the process to fully exit so returncode is populated.
         try:
             await asyncio.wait_for(process.wait(), timeout=5.0)
         except (TimeoutError, Exception):
@@ -318,22 +267,19 @@ class BashTool(Tool):
             return ToolResult(success=False, output="", error="Cancelled during execution.")
 
         output = "".join(output_chunks)
-        # output_bytes may overshoot by up to one chunk (64 KiB) because we
-        # check the budget after appending.  Trim to the hard limit here.
         truncated = len(output) >= MAX_OUTPUT_CHARS
         if truncated:
             output = output[:MAX_OUTPUT_CHARS]
 
         exit_code = process.returncode if process.returncode is not None else -1
-        header = f"$ {command}\n{'─' * 60}\n"
+        header = f"$ {command}\n{'─' * _terminal_width()}\n"
         if truncated:
             tail = output.rfind("\n", MAX_OUTPUT_CHARS - 2000, MAX_OUTPUT_CHARS)
             if tail > 0:
                 output = output[:tail]
             footer = (
                 f"\n\n[Output truncated at {MAX_OUTPUT_CHARS:,} characters. "
-                "Use a more specific command (e.g. limit with head/tail, "
-                "filter with grep, or narrow the scope) to see the rest.]"
+                "Use a more specific command (e.g. head/tail/grep) to see the rest.]"
             )
         elif timed_out:
             footer = f"\n[Command timed out after {timeout_ms}ms]"

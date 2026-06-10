@@ -25,16 +25,18 @@ from pathlib import Path
 from typing import Any
 
 from vico.core.types import (
-    Tool,
     ToolDefinition,
     ToolExecutionContext,
     ToolParameterSchema,
     ToolResult,
     ToolRiskLevel,
 )
+from vico.tools.base import Tool
 
 
 class WriteTool(Tool):
+    """Write a complete file to disk (creates or overwrites). Risk level: medium."""
+
     @property
     def risk_level(self) -> ToolRiskLevel:
         return "medium"
@@ -77,9 +79,6 @@ class WriteTool(Tool):
         raw_path = str(params["path"])
         file_path = Path(os.path.join(context.cwd, raw_path)).resolve()
 
-        # Block path traversal — keep consistent with read/edit tools.
-        # os.path.join discards `cwd` when raw_path is absolute, so the
-        # resolve() above will land outside cwd if the LLM passes /etc/...
         cwd_path = Path(context.cwd).resolve()
         if not file_path.is_relative_to(cwd_path):
             return ToolResult(
@@ -95,7 +94,6 @@ class WriteTool(Tool):
 
         existed = file_path.exists()
 
-        # Create parent directories if needed.
         try:
             await asyncio.to_thread(file_path.parent.mkdir, parents=True, exist_ok=True)
         except OSError as exc:
@@ -114,7 +112,6 @@ class WriteTool(Tool):
                 error=f"Cannot write file '{file_path}': {exc}",
             )
 
-        # Empty content: treat as 0 lines (not the ambiguous "1 line for empty file").
         lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         action = "Overwritten" if existed else "Created"
         summary = f"✓ {action} '{file_path}' ({lines} lines, {len(content.encode())} bytes)"

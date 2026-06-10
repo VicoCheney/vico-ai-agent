@@ -46,8 +46,6 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 dev-dependencies = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
     "mypy>=1.8.0",
     "ruff>=0.3.0",
 ]
@@ -65,5 +63,3 @@ python_version = "3.11"
 strict = true
 ignore_missing_imports = true
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"

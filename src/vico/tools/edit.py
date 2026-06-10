@@ -21,16 +21,18 @@ from pathlib import Path
 from typing import Any
 
 from vico.core.types import (
-    Tool,
     ToolDefinition,
     ToolExecutionContext,
     ToolParameterSchema,
     ToolResult,
     ToolRiskLevel,
 )
+from vico.tools.base import Tool
 
 
 class EditTool(Tool):
+    """Replace an exact text snippet in an existing file. Risk level: medium."""
+
     @property
     def risk_level(self) -> ToolRiskLevel:
         return "medium"
@@ -77,7 +79,6 @@ class EditTool(Tool):
         raw_path = str(params["path"])
         file_path = Path(os.path.join(context.cwd, raw_path)).resolve()
 
-        # Security: block path traversal
         cwd_path = Path(context.cwd).resolve()
         if not file_path.is_relative_to(cwd_path):
             return ToolResult(
@@ -132,7 +133,6 @@ class EditTool(Tool):
                         "Re-read the relevant section of the file first if unsure."
                     ),
                 )
-            # Line endings were the mismatch — proceed with normalised content
             count = count_norm
             original = normalised
 
