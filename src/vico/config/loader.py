@@ -1,5 +1,5 @@
 """
-Configuration Reader
+Configuration Loader
 ====================
 
 Loads .vicorc.json + .env, building the full AgentConfig.
@@ -28,10 +28,15 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from vico.core.types import AgentConfig, AgentLimits, ContextConfig, LLMConfig, ToolsConfig
+from vico.config.types.config import (
+    DEFAULT_MAX_TOKENS,
+    AgentConfig,
+    AgentLimits,
+    ContextConfig,
+    LLMConfig,
+    ToolsConfig,
+)
 from vico.exceptions import ConfigError, ProviderAuthError, ProviderUnknownError
-
-DEFAULT_MAX_TOKENS = 131072
 
 
 def _find_config_root(cwd: str | None = None) -> Path:

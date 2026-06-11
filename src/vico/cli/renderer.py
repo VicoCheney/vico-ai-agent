@@ -21,13 +21,13 @@ from vico.cli.permission_box import (
 )
 from vico.cli.render_utils import (
     TypewriterTracker,
-    collapse_to_single_line,
+    collapse_to_single_line,  # noqa: F401 — re-used by callers
     is_tty,
     strip_internal_tags,
-    terminal_width,
     truncate_by_width,
     write,
 )
+from vico.cli.spinner import SpinnerController, ToolRowController
 from vico.cli.tool_format import (
     fmt_done,
     fmt_footer,
@@ -35,48 +35,14 @@ from vico.cli.tool_format import (
     fmt_stat,
     tool_label,
 )
-from vico.core.types import ContextStats, ToolCall, ToolResult
+from vico.config.types.config import ContextStats
+from vico.tools.types.call import ToolCall
+from vico.tools.types.execution import ToolResult
+from vico.utils.terminal import terminal_width
 
 console = Console(highlight=False)
 
-# ─── State dataclasses ───────────────────────────────────────────────────────
-
-
-class _SpinnerState:
-    """Mutable state for an animated spinner (waiting / generating / thinking)."""
-
-    __slots__ = ("task", "start_time", "active")
-
-    def __init__(self) -> None:
-        self.task: asyncio.Task | None = None  # type: ignore[type-arg]
-        self.start_time: float = 0.0
-        self.active: bool = False
-
-    def reset(self) -> None:
-        self.task = None
-        self.start_time = 0.0
-        self.active = False
-
-
-class _ToolBatchState:
-    """Mutable state for in-flight tool call batch tracking."""
-
-    __slots__ = ("batch", "size", "done_ids", "overwrite_tasks", "spinner_task", "render_lock")
-
-    def __init__(self) -> None:
-        self.batch: dict[str, tuple[int, str, str]] = {}
-        self.size: int = 0
-        self.done_ids: set[str] = set()
-        self.overwrite_tasks: list[asyncio.Task] = []  # type: ignore[type-arg]
-        self.spinner_task: asyncio.Task | None = None  # type: ignore[type-arg]
-        self.render_lock: asyncio.Lock = asyncio.Lock()
-
-    def clear(self) -> None:
-        self.batch.clear()
-        self.size = 0
-        self.done_ids.clear()
-        self.overwrite_tasks.clear()
-        self.spinner_task = None
+# ─── Tiny state dataclass ────────────────────────────────────────────────────
 
 
 class _PermBoxState:
@@ -120,15 +86,6 @@ SEPARATOR_COLOR = theme.SEPARATOR_COLOR
 AGENT_NAME_STYLE = theme.AGENT_NAME_STYLE
 TOOL_NAME_STYLE = theme.TOOL_NAME_STYLE
 
-# Private aliases for render_utils
-_strip_internal_tags = strip_internal_tags
-_collapse_to_single_line = collapse_to_single_line
-_terminal_width = terminal_width
-_is_tty = is_tty
-_write = write
-_truncate_by_width = truncate_by_width
-_TypewriterTracker = TypewriterTracker
-
 
 # ─── Renderer ─────────────────────────────────────────────────────────────────
 
@@ -141,6 +98,10 @@ class TerminalRenderer:
     1. waiting spinner  – from reset_output_state() until first LLM chunk
     2. thinking spinner – dynamic frame + live thinking preview
     3. generating spinner – while buffering final Markdown for render
+
+    Spinner animation and tool-row management are delegated to:
+      SpinnerController   (cli/spinner.py)
+      ToolRowController   (cli/spinner.py)
     """
 
     def __init__(self) -> None:
@@ -162,22 +123,25 @@ class TerminalRenderer:
         self._text_buf: list[str] = []
         self._streaming_text: bool = False
         self._live: Live | None = None
-        self._tw_tracker: _TypewriterTracker | None = None
+        self._tw_tracker: TypewriterTracker | None = None
         self._typewriter_lines: int = 0
 
-        # Spinner state objects (each groups task + start_time + active flag)
-        self._waiting = _SpinnerState()
-        self._generating = _SpinnerState()
-        self._thinking_spinner = _SpinnerState()
+        # Shared spinner frame counter (mutable list so controllers share it by ref)
+        self._frame_counter: list[int] = [0]
 
-        # Tool batch tracking (spinner rows + overwrite tasks)
-        self._tools = _ToolBatchState()
+        # Spinner controllers (each groups task + start_time + active flag)
+        self._waiting = SpinnerController()
+        self._generating = SpinnerController()
+        self._thinking_spinner = SpinnerController()
+        for sc in (self._waiting, self._generating, self._thinking_spinner):
+            sc.attach_frame_counter(self._frame_counter)
+
+        # Tool batch tracking
+        self._tools = ToolRowController()
+        self._tools.attach_frame_counter(self._frame_counter)
 
         # Permission card geometry
         self._perm_box = _PermBoxState()
-
-        # Shared spinner frame counter
-        self._frame_idx: int = 0
 
         # Optional callback: (ToolCall) -> bool — True means auto-approved
         self._permissions_checker: Callable[[ToolCall], bool] | None = None
@@ -209,7 +173,7 @@ class TerminalRenderer:
         console.print()
 
     def print_divider(self) -> None:
-        console.print(Text("─" * _terminal_width(), style=SEPARATOR_COLOR))
+        console.print(Text("─" * terminal_width(), style=SEPARATOR_COLOR))
 
     # ── Per-turn reset ──────────────────────────────────────────────────────
 
@@ -233,68 +197,42 @@ class TerminalRenderer:
 
     def start_waiting(self) -> None:
         """Start the waiting spinner. Only active in TTY mode."""
-        if not _is_tty():
+        if not is_tty():
             return
-        self._waiting.start_time = time.monotonic()
-        self._waiting.active = True
+        self._waiting.start()
         try:
             loop = asyncio.get_running_loop()
-            self._waiting.task = loop.create_task(self._waiting_spin_loop())
+            self._waiting.task = loop.create_task(
+                self._waiting.run_phase_spinner([
+                    (0.0, "Connecting"),
+                    (2.0, "Waiting for response"),
+                    (6.0, "Still thinking"),
+                    (15.0, "Taking a while"),
+                ])
+            )
         except RuntimeError:
             self._waiting.active = False
 
     def _stop_waiting(self) -> None:
-        if self._waiting.task and not self._waiting.task.done():
-            self._waiting.task.cancel()
-        self._waiting.task = None
-        if self._waiting.active:
-            sys.stdout.write(f"\r{_CLEAR_LINE}")
-            sys.stdout.flush()
-            self._waiting.active = False
-
-    async def _animate_spinner(self, state: _SpinnerState, phases: list[tuple[float, str]]) -> None:
-        """Phase-progressive spinner animation loop. Runs until cancelled."""
-        try:
-            while True:
-                await asyncio.sleep(0.08)
-                self._frame_idx += 1
-                frame = _FRAMES[self._frame_idx % len(_FRAMES)]
-                elapsed = time.monotonic() - state.start_time
-                label = phases[0][1]
-                for threshold, phase_label in phases:
-                    if elapsed >= threshold:
-                        label = phase_label
-                line = f"\r{_CLEAR_LINE}{_DIM}{frame} {label}...  {elapsed:.1f}s{_RESET}"
-                sys.stdout.write(line)
-                sys.stdout.flush()
-        except asyncio.CancelledError:
-            pass
-
-    async def _waiting_spin_loop(self) -> None:
-        await self._animate_spinner(self._waiting, [
-            (0.0, "Connecting"),
-            (2.0, "Waiting for response"),
-            (6.0, "Still thinking"),
-            (15.0, "Taking a while"),
-        ])
+        self._waiting.stop_line()
 
     # ── Agent callbacks ─────────────────────────────────────────────────────
 
     def on_thinking(self, content: str) -> None:
         self._ensure_agent_label()
-        self._stop_spinner()
+        self._tools.stop_spinner()
         self._stop_generating()
         self._stop_live()
         if not self._thinking_active:
             self._thinking_active = True
-            self._thinking_spinner.start_time = time.monotonic()
-            _write(f"\r{_CLEAR_LINE}")
-            _write("\n")
+            self._thinking_spinner.start()
+            write(f"\r{_CLEAR_LINE}")
+            write("\n")
             if self._had_tool_output:
                 self._had_tool_output = False
-            _write(f"{_DIM}🧠 Thinking (0.0s){_RESET}\n")
-            _write(f"{_DIM}⠋⠋ …{_RESET}\n")
-            if _is_tty() and self._thinking_spinner.task is None:
+            write(f"{_DIM}🧠 Thinking (0.0s){_RESET}\n")
+            write(f"{_DIM}⠋⠋ …{_RESET}\n")
+            if is_tty() and self._thinking_spinner.task is None:
                 try:
                     loop = asyncio.get_running_loop()
                     self._thinking_spinner.task = loop.create_task(self._thinking_spin_loop())
@@ -309,7 +247,7 @@ class TerminalRenderer:
             self._end_thinking_compact()
 
         if self._had_tool_output and not self._text_buf:
-            _write("\n")
+            write("\n")
             self._had_tool_output = False
 
         self._text_buf.append(content)
@@ -333,14 +271,14 @@ class TerminalRenderer:
         # Tools needing approval: skip spinner; print_permission_request() takes over.
         needs_approval = not self._permissions_checker(tool_call) if self._permissions_checker else False
         if not needs_approval:
-            frame = _FRAMES[self._frame_idx % len(_FRAMES)]
-            _write(fmt_running(frame, name, param) + "\n")
+            frame = _FRAMES[self._frame_counter[0] % len(_FRAMES)]
+            write(fmt_running(frame, name, param) + "\n")
             self._had_tool_output = True
 
-            if _is_tty() and self._tools.spinner_task is None:
+            if is_tty() and self._tools.spinner_task is None:
                 try:
                     loop = asyncio.get_running_loop()
-                    self._tools.spinner_task = loop.create_task(self._spin_loop())
+                    self._tools.spinner_task = loop.create_task(self._tools.spin_loop(fmt_running))
                 except RuntimeError:
                     pass
 
@@ -363,41 +301,33 @@ class TerminalRenderer:
 
         # Auto-approved: overwrite spinner row synchronously (single-threaded asyncio).
         done_line = fmt_done(result.success, name, param, stat)
-        if _is_tty():
-            self._stop_spinner()
-            self._overwrite_sync(idx, done_line)
+        if is_tty():
+            self._tools.stop_spinner()
+            self._tools.overwrite_sync(idx, done_line)
         else:
-            _write(done_line + "\n")
+            write(done_line + "\n")
         self._had_tool_output = True
 
-    # ── Generating spinner (buffering final Markdown, before rich render) ───
+    # ── Generating spinner ───────────────────────────────────────────────────
 
     def _start_generating(self) -> None:
-        if not _is_tty():
+        if not is_tty():
             return
-        self._generating.start_time = time.monotonic()
-        self._generating.active = True
+        self._generating.start()
         try:
             loop = asyncio.get_running_loop()
-            self._generating.task = loop.create_task(self._generating_spin_loop())
+            self._generating.task = loop.create_task(
+                self._generating.run_phase_spinner([
+                    (0.0, "Generating response"),
+                    (5.0, "Still generating"),
+                    (12.0, "Almost there"),
+                ])
+            )
         except RuntimeError:
             self._generating.active = False
 
     def _stop_generating(self) -> None:
-        if self._generating.task and not self._generating.task.done():
-            self._generating.task.cancel()
-        self._generating.task = None
-        if self._generating.active:
-            sys.stdout.write(f"\r{_CLEAR_LINE}")
-            sys.stdout.flush()
-            self._generating.active = False
-
-    async def _generating_spin_loop(self) -> None:
-        await self._animate_spinner(self._generating, [
-            (0.0, "Generating response"),
-            (5.0, "Still generating"),
-            (12.0, "Almost there"),
-        ])
+        self._generating.stop_line()
 
     # ── Token tracking ──────────────────────────────────────────────────────
 
@@ -405,94 +335,21 @@ class TerminalRenderer:
         self._last_prompt_tokens = prompt_tokens
         self._last_completion_tokens = completion_tokens
 
-    # ── Tool spinner ─────────────────────────────────────────────────────────
-
-    async def _spin_loop(self) -> None:
-        """Animate spinner rows for all pending tool calls.
-
-        Builds one ANSI string: jump to topmost pending row, rewrite each row,
-        move cursor back to bottom — all in one write() to avoid interleaving.
-        """
-        try:
-            while True:
-                await asyncio.sleep(0.08)
-                self._frame_idx += 1
-                frame = _FRAMES[self._frame_idx % len(_FRAMES)]
-                async with self._tools.render_lock:
-                    pending = sorted(
-                        [(tid, info) for tid, info in self._tools.batch.items() if tid not in self._tools.done_ids],
-                        key=lambda x: x[1][0],  # sort by idx (top row first)
-                    )
-                    if not pending:
-                        break
-
-                    topmost_idx = pending[0][1][0]
-                    lines_to_top = self._tools.size - topmost_idx
-                    buf = f"\033[{lines_to_top}A"
-
-                    prev_idx = topmost_idx
-                    for _, (idx, name, param) in pending:
-                        gap = idx - prev_idx
-                        if gap > 0:
-                            buf += f"\033[{gap}B"
-                        buf += f"\r{_CLEAR_LINE}{fmt_running(frame, name, param)}"
-                        prev_idx = idx
-
-                    rows_to_bottom = self._tools.size - prev_idx
-                    if rows_to_bottom > 0:
-                        buf += f"\033[{rows_to_bottom}B"
-                    buf += "\r"
-
-                    sys.stdout.write(buf)
-                    sys.stdout.flush()
-        finally:
-            self._tools.spinner_task = None
-
-    def _overwrite_sync(self, idx: int, new_line: str) -> None:
-        """Synchronously overwrite a tool row in-place.
-
-        Atomic w.r.t. spinner loop (asyncio is single-threaded).
-        Move up (size - idx) lines, write done line, move back down.
-        """
-        lines_up = self._tools.size - idx
-        if lines_up <= 0:
-            sys.stdout.write(f"\r{_CLEAR_LINE}{new_line}\n")
-        elif lines_up == 1:
-            sys.stdout.write(f"\033[1A\r{_CLEAR_LINE}{new_line}\n")
-        else:
-            sys.stdout.write(f"\033[{lines_up}A\r{_CLEAR_LINE}{new_line}\n\033[{lines_up - 1}B")
-        sys.stdout.flush()
-
-    async def _overwrite_async(self, idx: int, new_line: str) -> None:
-        """Overwrite a tool row in-place under render_lock (prevents spin_loop races)."""
-        async with self._tools.render_lock:
-            lines_up = self._tools.size - idx
-            if lines_up <= 0:
-                sys.stdout.write(f"\r{_CLEAR_LINE}{new_line}")
-            else:
-                sys.stdout.write(f"\033[{lines_up}A\r{_CLEAR_LINE}{new_line}\n\033[{lines_up - 1}B")
-            sys.stdout.flush()
-
-    def _stop_spinner(self) -> None:
-        if self._tools.spinner_task and not self._tools.spinner_task.done():
-            self._tools.spinner_task.cancel()
-            self._tools.spinner_task = None
-
-    # ── Thinking spinner ────────────────────────────────────────────────────
+    # ── Thinking spinner ─────────────────────────────────────────────────────
 
     async def _thinking_spin_loop(self) -> None:
         """Animate the two-line thinking indicator with snippet and elapsed time."""
         try:
             while True:
                 await asyncio.sleep(0.1)
-                self._frame_idx += 1
-                frame = _FRAMES[self._frame_idx % len(_FRAMES)]
+                self._frame_counter[0] += 1
+                frame = _FRAMES[self._frame_counter[0] % len(_FRAMES)]
                 elapsed = time.monotonic() - self._thinking_spinner.start_time
 
                 raw = "".join(self._thinking_buf).replace("\n", " ").strip()
-                tw = _terminal_width()
+                tw = terminal_width()
                 snippet_budget = max(20, int(tw * 0.80) - 4)
-                snippet = _truncate_by_width(raw, snippet_budget) if raw else "…"
+                snippet = truncate_by_width(raw, snippet_budget) if raw else "…"
 
                 buf = (
                     f"\033[2A"
@@ -510,9 +367,7 @@ class TerminalRenderer:
 
     def _stop_thinking_spinner(self) -> None:
         """Cancel the thinking spinner task (does NOT erase the line)."""
-        if self._thinking_spinner.task and not self._thinking_spinner.task.done():
-            self._thinking_spinner.task.cancel()
-        self._thinking_spinner.task = None
+        self._thinking_spinner.cancel_task()
 
     # ── rich.Live text rendering ─────────────────────────────────────────────
 
@@ -528,7 +383,7 @@ class TerminalRenderer:
         if finalize and self._text_buf:
             self._stop_generating()
             full = "".join(self._text_buf)
-            full = _strip_internal_tags(full)
+            full = strip_internal_tags(full)
             if full.strip():
                 console.print(Markdown(full))
 
@@ -543,7 +398,7 @@ class TerminalRenderer:
     def on_error(self, error: Exception) -> None:
         self._stop_waiting()
         self._stop_thinking_spinner()
-        self._stop_spinner()
+        self._tools.stop_spinner()
         self._stop_generating()
         self._stop_live(finalize=False)
         self._end_thinking_compact()
@@ -554,7 +409,7 @@ class TerminalRenderer:
         pass
 
     def on_loop(self, iteration: int) -> None:
-        self._stop_spinner()
+        self._tools.stop_spinner()
         self._stop_generating()
         self._stop_live(finalize=True)
         self._tools.clear()
@@ -569,7 +424,7 @@ class TerminalRenderer:
     def flush(self) -> None:
         self._stop_waiting()
         self._stop_thinking_spinner()
-        self._stop_spinner()
+        self._tools.stop_spinner()
         self._stop_generating()
         self._stop_live(finalize=True)
         self._end_thinking_compact()
@@ -600,7 +455,7 @@ class TerminalRenderer:
 
         term_w = shutil.get_terminal_size(fallback=(100, 24)).columns
         snippet_budget = max(20, int(term_w * 0.80) - 3)
-        summary = _truncate_by_width(full, snippet_budget) if full else "…"
+        summary = truncate_by_width(full, snippet_budget) if full else "…"
 
         buf = (
             f"\033[2A"
@@ -610,20 +465,20 @@ class TerminalRenderer:
             f"{_DIM}—> {_ITALIC}{summary}{_RESET}\n"
             f"\n"
         )
-        _write(buf)
+        write(buf)
 
     # ── Permission prompt ────────────────────────────────────────────────────
 
     def print_permission_request(self, tool_call: ToolCall) -> None:
         """Render the permission card and record its geometry for collapse."""
-        self._stop_spinner()
+        self._tools.stop_spinner()
         self._stop_live(finalize=True)
         self._end_thinking_compact()
 
         lines = build_permission_box(tool_call, self._cwd)
-        _write("\n")
+        write("\n")
         for ln in lines:
-            _write(ln + "\n")
+            write(ln + "\n")
         sys.stdout.flush()
 
         self._perm_box.line_count = 1 + len(lines)
@@ -634,13 +489,13 @@ class TerminalRenderer:
     def collapse_permission_request(self, decision: str) -> None:
         """Replace the permission card with a compact summary line."""
         summary = fmt_approval_summary(decision, self._perm_box.tool_name, self._perm_box.param)
-        if _is_tty() and self._perm_box.line_count > 0:
+        if is_tty() and self._perm_box.line_count > 0:
             n = self._perm_box.line_count
             sys.stdout.write(f"\033[{n}A\r\033[J{summary}\n")
             sys.stdout.flush()
             self._tools.size += n - 1
         else:
-            _write(summary + "\n")
+            write(summary + "\n")
         self._perm_box.line_count = 0
 
     # ── Status helpers ───────────────────────────────────────────────────────
@@ -654,7 +509,7 @@ class TerminalRenderer:
     def print_aborted(self) -> None:
         self._stop_waiting()
         self._stop_thinking_spinner()
-        self._stop_spinner()
+        self._tools.stop_spinner()
         self._stop_generating()
         self._stop_live(finalize=False)
         self._end_thinking_compact()
@@ -668,7 +523,7 @@ class TerminalRenderer:
 
     def print_context_stats(self, stats: ContextStats) -> None:
         elapsed = time.monotonic() - self._turn_start_time if self._turn_start_time else 0.0
-        _write(
+        write(
             "\n"
             + fmt_footer(
                 elapsed_s=elapsed,

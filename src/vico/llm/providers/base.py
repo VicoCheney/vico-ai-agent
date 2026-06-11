@@ -19,20 +19,22 @@ import httpx
 from openai import AsyncOpenAI
 
 from vico.core.types import (
-    DoneChunk,
-    ErrorChunk,
-    LLMRequest,
-    ReasoningChunk,
-    StreamChunk,
     TextBlock,
-    TextChunk,
     TokenUsage,
-    ToolCall,
-    ToolCallChunk,
-    ToolDefinition,
     ToolResultBlock,
 )
 from vico.llm.base import LLM
+from vico.llm.types.request import LLMRequest
+from vico.llm.types.stream import (
+    DoneChunk,
+    ErrorChunk,
+    ReasoningChunk,
+    StreamChunk,
+    TextChunk,
+    ToolCallChunk,
+)
+from vico.tools.types.call import ToolCall
+from vico.tools.types.definition import ToolDefinition
 
 __all__ = ["LLM", "OpenAICompatibleLLM"]
 

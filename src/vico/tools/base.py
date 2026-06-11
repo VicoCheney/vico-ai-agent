@@ -11,7 +11,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from vico.core.types import ToolDefinition, ToolExecutionContext, ToolResult, ToolRiskLevel
+from vico.tools.types.definition import ToolDefinition
+from vico.tools.types.execution import ToolExecutionContext, ToolResult, ToolRiskLevel
 
 
 class Tool(ABC):

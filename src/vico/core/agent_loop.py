@@ -13,31 +13,32 @@ import os
 import re
 from typing import TYPE_CHECKING, Literal
 
+from vico.config.types.config import AgentConfig
 from vico.core.context_manager import ContextManager
 from vico.core.permission_controller import PermissionController
+from vico.core.skill_provider import ISkillProvider
 from vico.core.system_prompt import build_system_prompt
 from vico.core.types import (
     AgentCallbacks,
-    AgentConfig,
     AgentState,
-    DoneChunk,
-    ErrorChunk,
-    LLMRequest,
-    ReasoningChunk,
-    TextChunk,
-    ToolCall,
-    ToolCallChunk,
-    ToolExecutionContext,
-    ToolResult,
 )
 from vico.llm.base import LLM
+from vico.llm.types.request import LLMRequest
+from vico.llm.types.stream import (
+    DoneChunk,
+    ErrorChunk,
+    ReasoningChunk,
+    TextChunk,
+    ToolCallChunk,
+)
 from vico.tools.registry import ToolRegistry
+from vico.tools.types.call import ToolCall
+from vico.tools.types.execution import ToolExecutionContext, ToolResult
 
 __all__ = ["AgentCallbacks", "AgentLoop"]
 
 if TYPE_CHECKING:
-    from vico.core.types import ContextStats
-    from vico.skills.loader import SkillLoader
+    from vico.config.types.config import ContextStats
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ class AgentLoop:
         permissions: PermissionController,
         config: AgentConfig,
         callbacks: AgentCallbacks,
-        skill_loader: SkillLoader | None = None,
+        skill_loader: ISkillProvider | None = None,
     ) -> None:
         self._llm = llm
         self._context = context
@@ -67,7 +68,7 @@ class AgentLoop:
         self._permissions = permissions
         self._config = config
         self._callbacks = callbacks
-        self._skill_loader = skill_loader
+        self._skill_loader: ISkillProvider | None = skill_loader
         self._system_prompt = build_system_prompt(config.cwd, skill_loader=skill_loader)
         self._state: AgentState = "idle"
         self._cancel_event = asyncio.Event()

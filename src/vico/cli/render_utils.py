@@ -6,18 +6,13 @@ import re
 import sys
 import unicodedata
 
-# Re-export terminal geometry so both CLI and Tools can share without reverse dependency
-from vico.utils.terminal import col_widths, terminal_width  # noqa: F401
-
 __all__ = [
     "PRIORITY_PARAM_KEYS",
     "char_width",
-    "col_widths",
     "collapse_to_single_line",
     "is_tty",
     "pad_to_width",
     "strip_internal_tags",
-    "terminal_width",
     "truncate_by_width",
     "visible_width",
     "wcslen",

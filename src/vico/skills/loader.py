@@ -16,7 +16,7 @@ import logging
 import re
 from pathlib import Path
 
-from vico.core.types import SkillContent, SkillMeta
+from vico.skills.types.meta import SkillContent, SkillMeta
 
 logger = logging.getLogger(__name__)
 

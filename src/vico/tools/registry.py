@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from vico.core.types import ToolDefinition, ToolExecutionContext, ToolResult
 from vico.tools.base import Tool
+from vico.tools.types.definition import ToolDefinition
+from vico.tools.types.execution import ToolExecutionContext, ToolResult
 
 
 class ToolRegistry:

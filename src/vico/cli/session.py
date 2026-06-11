@@ -10,23 +10,23 @@ assembly logic is independently testable.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from prompt_toolkit import PromptSession
 from rich.console import Console
 
+from vico.cli.approval import request_approval
 from vico.cli.renderer import TerminalRenderer
+from vico.config.types.config import AgentConfig
 from vico.core.agent_loop import AgentCallbacks, AgentLoop
 from vico.core.context_manager import ContextManager
 from vico.core.permission_controller import PermissionController
-from vico.core.types import AgentConfig, SkillMeta, ToolCall
 from vico.llm.llm_factory import create_llm_from_config
 from vico.skills.loader import SkillLoader
+from vico.skills.types.meta import SkillMeta
 from vico.tools import BUILTIN_TOOLS
 from vico.tools.registry import ToolRegistry
-
-if TYPE_CHECKING:
-    pass
+from vico.tools.types.call import ToolCall
 
 console = Console()
 
@@ -88,8 +88,6 @@ class VicoSession:
         async def _approval_cb(
             tool_call: ToolCall,
         ) -> Literal["approve", "approve_always", "deny"]:
-            from vico.cli import request_approval
-
             return await request_approval(
                 tool_call, renderer, self._session, quit_event, self._agent.cancel_event
             )
@@ -116,12 +114,12 @@ class VicoSession:
 
     async def run(self) -> None:
         """Print welcome banner and start the interactive REPL."""
+        from vico.cli.repl import repl
+
         loop = asyncio.get_running_loop()
         self._renderer.print_welcome()
 
         try:
-            from vico.cli import repl
-
             await repl(
                 self._agent,
                 self._renderer,
@@ -135,7 +133,7 @@ class VicoSession:
         finally:
             await self._agent.aclose()
 
-    # ─── /model command helper (exposed for CLI command use) ────────────
+    # ─── Properties ──────────────────────────────────────────────────────
 
     @property
     def agent(self) -> AgentLoop:

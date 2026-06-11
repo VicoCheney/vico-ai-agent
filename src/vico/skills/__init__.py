@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from vico.core.types import SkillContent, SkillMeta
 from vico.skills.loader import SkillLoader
+from vico.skills.types.meta import SkillContent, SkillMeta
 
 __all__ = ["SkillLoader", "SkillMeta", "SkillContent"]

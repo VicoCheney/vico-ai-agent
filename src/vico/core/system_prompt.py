@@ -20,9 +20,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vico.core.prompt_loader import get_loader
+from vico.core.skill_provider import ISkillProvider
 
 if TYPE_CHECKING:
-    from vico.skills.loader import SkillLoader
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -66,12 +67,12 @@ def _make_variables(cwd: str) -> dict[str, str]:
     }
 
 
-def _build_skills_summary(skill_loader: SkillLoader) -> str:
+def _build_skills_summary(skill_loader: ISkillProvider) -> str:
     """Build the skills JSON block injected into the system prompt.
 
     Returns "" if no user-invocable skills are available.
     """
-    from vico.core.types import SkillMeta
+    from vico.skills.types.meta import SkillMeta
 
     metas: list[SkillMeta] = [m for m in skill_loader.get_all_metas() if m.user_invocable]
     if not metas:
@@ -109,7 +110,7 @@ respond with a `<use_skill>` tag to request loading its full instructions.
 - Only activate a skill when you are confident it matches the current task."""
 
 
-def build_system_prompt(cwd: str, skill_loader: SkillLoader | None = None) -> str:
+def build_system_prompt(cwd: str, skill_loader: ISkillProvider | None = None) -> str:
     """Render the complete system prompt from Agent.md template."""
     variables = _make_variables(cwd)
     loader = get_loader()

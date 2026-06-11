@@ -21,14 +21,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from vico.core.types import (
+from vico.tools.base import Tool
+from vico.tools.types.definition import (
     ToolDefinition,
-    ToolExecutionContext,
     ToolParameterSchema,
+)
+from vico.tools.types.execution import (
+    ToolExecutionContext,
     ToolResult,
     ToolRiskLevel,
 )
-from vico.tools.base import Tool
 from vico.utils.terminal import terminal_width as _terminal_width
 
 MAX_OUTPUT_CHARS = 30_000

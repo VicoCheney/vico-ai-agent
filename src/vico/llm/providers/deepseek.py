@@ -22,9 +22,10 @@ from dataclasses import dataclass, field
 import httpx
 from openai import AsyncOpenAI
 
-from vico.core.types import LLMRequest, ModelInfo, StreamChunk
 from vico.llm.models import DEEPSEEK_MODELS, PROVIDER_DEFAULTS
 from vico.llm.providers.base import _DEFAULT_TIMEOUT, OpenAICompatibleLLM
+from vico.llm.types.request import LLMRequest, ModelInfo
+from vico.llm.types.stream import StreamChunk
 
 __all__ = ["DeepSeekConfig", "DeepSeekLLM"]
 

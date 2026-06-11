@@ -7,9 +7,9 @@ import time
 import uuid
 from typing import Any
 
+from vico.config.types.config import ContextStats
 from vico.core.types import (
     ContentBlock,
-    ContextStats,
     Message,
     TextBlock,
     TokenUsage,

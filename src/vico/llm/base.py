@@ -11,7 +11,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
-from vico.core.types import LLMRequest, StreamChunk
+from vico.llm.types.request import LLMRequest
+from vico.llm.types.stream import StreamChunk
 
 
 class LLM(ABC):

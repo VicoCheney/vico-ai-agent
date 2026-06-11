@@ -34,7 +34,7 @@ def _resolve_prompts_dir() -> Path:
     return prompts
 
 
-_PROMPTS_DIR = _resolve_prompts_dir()
+_PROMPTS_DIR: Path | None = None
 # Rendered prompt is ~1700 tokens; 8000 gives headroom for persona/user-profile overrides.
 SYSTEM_PROMPT_TOKEN_BUDGET = 8000
 
@@ -43,7 +43,7 @@ class PromptLoader:
     """Load and render the system prompt from ``Agent.md`` template."""
 
     def __init__(self, prompts_dir: Path | None = None) -> None:
-        self._prompts_dir = prompts_dir or _PROMPTS_DIR
+        self._prompts_dir = prompts_dir or _resolve_prompts_dir()
         self._included_paths: list[str] = []
 
         self._jinja_env = Environment(

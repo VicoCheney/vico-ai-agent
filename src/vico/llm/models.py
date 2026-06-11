@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from vico.core.types import ModelInfo
+from vico.llm.types.request import ModelInfo
 
 # Provider defaults — base_url and default model for each provider.
 PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {

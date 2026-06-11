@@ -4,8 +4,9 @@ Permission Controller
 
 from __future__ import annotations
 
-from vico.core.types import ToolCall, ToolRiskLevel
 from vico.tools.registry import ToolRegistry
+from vico.tools.types.call import ToolCall
+from vico.tools.types.execution import ToolRiskLevel
 
 
 class PermissionController:

@@ -7,13 +7,14 @@ import re
 from vico.cli import theme
 from vico.cli.render_utils import (
     PRIORITY_PARAM_KEYS,
-    col_widths,
     collapse_to_single_line,
     pad_to_width,
     truncate_by_width,
     wcslen,
 )
-from vico.core.types import ToolCall, ToolResult
+from vico.tools.types.call import ToolCall
+from vico.tools.types.execution import ToolResult
+from vico.utils.terminal import col_widths
 
 _RESET = theme.RESET
 _BOLD = theme.BOLD
