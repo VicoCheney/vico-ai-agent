@@ -9,7 +9,6 @@ from vico.cli.render_utils import (
     PRIORITY_PARAM_KEYS,
     collapse_to_single_line,
     pad_to_width,
-    truncate_by_width,
     wcslen,
 )
 from vico.tools.types.call import ToolCall
@@ -26,10 +25,19 @@ _CYAN_BOLD = theme.CYAN_BOLD
 _BRIGHT_BLK = theme.BRIGHT_BLK
 
 
-def tool_label(tool_call: ToolCall, cwd: str = "") -> tuple[str, str]:
+def tool_label(
+    tool_call: ToolCall,
+    cwd: str = "",
+    skill_paths: dict[str, str] | None = None,
+) -> tuple[str, str]:
     """Return (tool_name, param_str) where param is always a single line."""
     if not tool_call.input:
         return tool_call.name, ""
+
+    if tool_call.name == "activate_skill":
+        skill_id = str(tool_call.input.get("skill_id", ""))
+        if skill_paths and skill_id in skill_paths:
+            return tool_call.name, skill_paths[skill_id]
 
     def _normalise(key: str, raw: str) -> str:
         val = raw
@@ -56,21 +64,65 @@ def fmt_stat(result: ToolResult) -> str:
     return f"exit {m.group(1)}" if m else err[:8]
 
 
+def _truncate_cell(text: str, width: int) -> str:
+    text = collapse_to_single_line(text)
+    if wcslen(text) <= width:
+        return text
+    if width <= 3:
+        return "." * width
+
+    max_body = width - 3
+    chars: list[str] = []
+    used = 0
+    for ch in text:
+        ch_width = wcslen(ch)
+        if used + ch_width > max_body:
+            break
+        chars.append(ch)
+        used += ch_width
+    return "".join(chars) + "..."
+
+
+def _left_cell(text: str, width: int) -> str:
+    return pad_to_width(_truncate_cell(text, width), width)
+
+
+def _right_cell(text: str, width: int) -> str:
+    text = _truncate_cell(text, width)
+    return (" " * max(0, width - wcslen(text))) + text
+
+
+def _tool_cell(icon: str, name: str, width: int) -> str:
+    return _left_cell(f"{icon} {name}", width)
+
+
+def _color_tool_cell(cell: str, icon_color: str) -> str:
+    if len(cell) <= 2:
+        return f"{icon_color}{cell}{_RESET}"
+    return f"{icon_color}{cell[:2]}{_RESET}{_CYAN_BOLD}{cell[2:]}{_RESET}"
+
+
 def fmt_running(frame: str, name: str, param: str) -> str:
-    """Spinner row: <frame> <tool_col>  <param_cols>"""
-    _tool_col, _param_cols, _ = col_widths()
-    name_col = collapse_to_single_line(name).ljust(_tool_col)
-    param_col = pad_to_width(truncate_by_width(collapse_to_single_line(param), _param_cols), _param_cols)
-    return f"{_BRIGHT_BLK}{frame} {_RESET}{_CYAN_BOLD}{name_col}{_RESET}  {_DIM}{param_col}{_RESET}"
+    """Spinner row split into command/content/status/blank regions."""
+    _tool_col, _param_cols, _stat_col, _blank_col = col_widths()
+    name_col = _tool_cell(frame, name, _tool_col)
+    param_col = _left_cell(param, _param_cols)
+    stat_col = " " * _stat_col
+    blank_col = " " * _blank_col
+    return (
+        f"{_color_tool_cell(name_col, _BRIGHT_BLK)}"
+        f"{_DIM}{param_col}{_RESET}"
+        f"{stat_col}{blank_col}"
+    )
 
 
 def fmt_done(success: bool, name: str, param: str, stat: str) -> str:
-    """Done row: <icon> <tool_col>  <param_cols>  <stat_col>"""
-    _tool_col, _param_cols, _stat_col = col_widths()
+    """Done row split into command/content/status/blank regions."""
+    _tool_col, _param_cols, _stat_col, _blank_col = col_widths()
     icon_color = _GREEN if success else _RED
     icon = "✓" if success else "✗"
-    name_col = collapse_to_single_line(name).ljust(_tool_col)
-    param_col = pad_to_width(truncate_by_width(collapse_to_single_line(param), _param_cols), _param_cols)
+    name_col = _tool_cell(icon, name, _tool_col)
+    param_col = _left_cell(param, _param_cols)
     approval_labels = {"approved", "approved always", "auto approved", "denied"}
     if stat in approval_labels:
         if stat == "approved always":
@@ -79,19 +131,19 @@ def fmt_done(success: bool, name: str, param: str, stat: str) -> str:
             stat_color = _GREEN
         else:
             stat_color = _BRIGHT_BLK
-        stat_r = stat.rjust(_stat_col)
+        stat_r = _right_cell(stat, _stat_col)
         return (
-            f"{icon_color}{icon}{_RESET}"
-            f" {_CYAN_BOLD}{name_col}{_RESET}"
-            f"  {_DIM}{param_col}{_RESET}"
-            f"  {stat_color}{stat_r}{_RESET}"
+            f"{_color_tool_cell(name_col, icon_color)}"
+            f"{_DIM}{param_col}{_RESET}"
+            f"{stat_color}{stat_r}{_RESET}"
+            f"{' ' * _blank_col}"
         )
-    stat_r = stat.rjust(_stat_col)
+    stat_r = _right_cell(stat, _stat_col)
     return (
-        f"{icon_color}{icon}{_RESET}"
-        f" {_CYAN_BOLD}{name_col}{_RESET}"
-        f"  {_DIM}{param_col}{_RESET}"
-        f"  {_BRIGHT_BLK}{stat_r}{_RESET}"
+        f"{_color_tool_cell(name_col, icon_color)}"
+        f"{_DIM}{param_col}{_RESET}"
+        f"{_BRIGHT_BLK}{stat_r}{_RESET}"
+        f"{' ' * _blank_col}"
     )
 
 

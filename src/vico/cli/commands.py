@@ -41,7 +41,7 @@ def print_help() -> None:
         ("/model", "Show current provider & model"),
         ("/model <p/m>", "Switch model  e.g. deepseek/deepseek-v4-pro"),
         ("/skills", "List all available skills"),
-        ("/skill <id>", "Manually activate a skill by its ID"),
+        ("/skill <id> [args]", "Manually activate a skill with optional arguments"),
         ("/help", "Show this message"),
         ("/exit", "Exit Vico"),
     ]
@@ -84,9 +84,12 @@ def handle_skills_command(skill_loader: SkillLoader) -> None:
     for meta in metas:
         hint = f" [dim]{meta.argument_hint}[/dim]" if meta.argument_hint else ""
         lock = " [yellow](manual only)[/yellow]" if meta.disable_model_invocation else ""
+        tools = f" [dim]tools:{','.join(meta.allowed_tools)}[/dim]" if meta.allowed_tools else ""
+        risk = f" [dim]risk:{meta.risk_level}[/dim]"
+        source = f" [dim]source:{meta.source}[/dim]"
         cmd = f"/skill {meta.skill_id}{hint}"
         desc_line = meta.description.splitlines()[0] if meta.description else ""
-        console.print(f"  [cyan]{cmd:<28}[/cyan]{lock}  [dim]{desc_line}[/dim]")
+        console.print(f"  [cyan]{cmd:<28}[/cyan]{lock}{source}{risk}{tools}  [dim]{desc_line}[/dim]")
     console.print(div)
     console.print()
 
@@ -94,12 +97,14 @@ def handle_skills_command(skill_loader: SkillLoader) -> None:
 def handle_skill_command(user_input: str, agent: AgentLoop, skill_loader: SkillLoader) -> None:
     parts = user_input.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        console.print("  [dim]Usage: /skill <skill-id>[/dim]")
+        console.print("  [dim]Usage: /skill <skill-id> [arguments][/dim]")
         handle_skills_command(skill_loader)
         return
 
-    skill_id = parts[1].strip()
-    ok = agent.inject_skill_by_id(skill_id)
+    skill_parts = parts[1].strip().split(maxsplit=1)
+    skill_id = skill_parts[0]
+    arguments = skill_parts[1] if len(skill_parts) > 1 else ""
+    ok = agent.inject_skill_by_id(skill_id, arguments=arguments)
     if ok:
         console.print(f"  [green]✓[/green]  Skill [cyan]{skill_id}[/cyan] loaded into context.")
         console.print("  [dim]The skill instructions are now available for the next message.[/dim]")

@@ -83,7 +83,10 @@ def _build_skills_summary(skill_loader: ISkillProvider) -> str:
             "id": m.skill_id,
             "name": m.name,
             "description": m.description,
+            "source": m.source,
+            "risk_level": m.risk_level,
             **({"argument_hint": m.argument_hint} if m.argument_hint else {}),
+            **({"allowed_tools": m.allowed_tools} if m.allowed_tools else {}),
             **({"disable_model_invocation": True} if m.disable_model_invocation else {}),
         }
         for m in metas
@@ -96,14 +99,15 @@ def _build_skills_summary(skill_loader: ISkillProvider) -> str:
 
 You have the following skills available. Each skill contains specialized instructions
 for a specific type of task. When the user's request clearly matches a skill's purpose,
-respond with a `<use_skill>` tag to request loading its full instructions.
+call the `activate_skill` tool to request loading its full instructions.
 
 ```json
 {json_block}
 ```
 
 **How to activate a skill:**
-- Output `<use_skill>SKILL_ID</use_skill>` anywhere in your response text.
+- Prefer calling the structured `activate_skill` tool with `skill_id`, optional `arguments`, and a short `reason`.
+- `<use_skill>SKILL_ID</use_skill>` is supported only as a legacy fallback.
 - The system will load the full skill instructions and inject them into the next turn.
 - Skills marked `"disable_model_invocation": true` can only be triggered by the user (via `/skill SKILL_ID`).
 - You may activate at most one skill per turn.

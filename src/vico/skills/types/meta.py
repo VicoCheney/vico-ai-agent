@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
+
+SkillSource = Literal["project", "user"]
 
 
 @dataclass
@@ -16,6 +19,9 @@ class SkillMeta:
     argument_hint: str = ""  # Shown in /skills list, e.g. "[file-or-dir]"
     disable_model_invocation: bool = False  # If True, model cannot self-activate this skill
     user_invocable: bool = True             # If False, hidden from /skills list
+    allowed_tools: list[str] = field(default_factory=list)
+    risk_level: str = "low"
+    source: SkillSource = "project"
     skill_dir: Path = field(default_factory=Path)
 
 

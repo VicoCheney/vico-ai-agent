@@ -6,9 +6,9 @@
 
 | 文件 | 类型 | 说明 |
 |------|------|------|
-| [architecture.md](./architecture.md) | Markdown | **主文档**：完整的架构设计、决策模型、代码索引和 ADR |
-| [agent-flow.mmd](./agent-flow.mmd) | Mermaid | Agent 决策与执行的全流程流程图（flowchart） |
-| [agent-sequence.mmd](./agent-sequence.mmd) | Mermaid | 以"电脑体检"为例的完整时序图（sequence diagram） |
+| [architecture.md](./architecture.md) | Markdown | **主文档**：当前代码实现对应的架构、工具调度、Skill 机制、代码索引和 ADR |
+| [agent-flow.mmd](./agent-flow.mmd) | Mermaid | Agent Loop、工具调度与 Skill 懒加载流程图（flowchart） |
+| [agent-sequence.mmd](./agent-sequence.mmd) | Mermaid | 以"电脑体检"为例的当前执行时序图（sequence diagram） |
 
 ## 快速阅读路径
 
@@ -23,6 +23,6 @@
 
 ## 核心思想一句话总结
 
-> **先规划，再批量执行**：复杂任务先用 Planner（无工具权限）做一次轻量拆解，
-> 生成 `[batch]`/`[seq]` 标注的执行计划，再让 Executor 按计划批量发出工具调用，
-> 将 LLM round-trips 从 O(N) 降到接近 O(log N)。
+> **提示词规划 + 批量执行**：复杂任务由同一个 Agent Loop 通过 `<plan>` 文本先规划，
+> 再让模型在同一轮或后续轮次批量发出 structured tool calls；
+> Skill 正文按需从 `.vico/skills` 懒加载，避免常驻上下文膨胀。

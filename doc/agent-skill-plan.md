@@ -116,21 +116,20 @@ Gemini CLI 的扩展架构分三层：
 | 提示词加载 | `core/prompt_loader.py` | ✅ FileSystemLoader，支持 `{% include %}` |
 | Agent 循环 | `core/agent_loop.py` | ✅ think→act→observe，支持并发工具调用 |
 | 配置读取 | `config.py` | ✅ `.vicorc.json` + `.env`，多级查找 |
-| CLI 命令 | `cli/__init__.py` | ✅ `/clear`、`/model`、`/help`、`/exit` |
+| CLI 命令 | `cli/commands.py`, `cli/repl.py` | ✅ `/clear`、`/model`、`/help`、`/exit`、`/skills`、`/skill` |
 | 权限控制 | `core/permission_controller.py` | ✅ 风险级别自动审批 + 会话审批 |
 | 人物角色 | `prompts/Vico.md`, `prompts/User.md` | ✅ 支持 `<cwd>/.vico/` → `~/.vico/` → 默认三级覆盖 |
+| Skill 扫描 | `skills/loader.py` | ✅ 支持 `<cwd>/.vico/skills` 与 `~/.vico/skills` |
+| Skill 激活 | `tools/activate_skill.py` | ✅ 支持结构化 `activate_skill` 工具，保留 `<use_skill>` 兼容后备 |
 
-### 2.2 现有能力与 Skill 的对比缺口
+### 2.2 现有能力与 Skill 的剩余缺口
 
-| 缺失能力 | 影响 |
+| 剩余缺口 | 影响 |
 |---------|------|
-| 无 Skill 目录扫描机制 | 无法发现用户放置的 `.vico/skills/` 目录 |
-| 无 Skill 元数据注入 | 模型不知道有哪些 Skill 可用 |
-| 无 `/skill` 命令 | 无法手动触发 Skill |
-| 无动态 Skill 激活工具 | 模型无法按需加载 Skill 正文 |
+| 无动态命令注入 | SKILL.md 中的动态上下文命令不会自动执行并内联 |
 | 无 Custom Commands | 无法用 `/cmd` 快捷触发 Prompt 模板 |
 | 无 Hooks 机制 | 无法在生命周期节点拦截执行 |
-| 无 SKILL.md frontmatter 解析 | 无法读取 Skill 元数据（description、调用控制等）|
+| `allowed-tools` 仅解析展示 | 尚未按 Skill 临时调整工具权限 |
 
 ### 2.3 架构优势（可利用的基础设施）
 
@@ -198,7 +197,7 @@ my-skill/
 | 2 | `~/.vico/skills/<skill-name>/` | 用户级，全局可用 |
 | 3 | 内置 Skill（Vico 官方打包） | 默认能力 |
 
-> **别名路径支持**：同时扫描 `.agents/skills/` 和 `~/.agents/skills/`（与 Gemini CLI、Claude Code 跨平台兼容）
+> **当前项目口径**：Vico 只从 `.vico/skills/` 和 `~/.vico/skills/` 扫描 Skill；暂不支持 `.agents/skills/` 兼容路径。
 
 ### 3.2 调用方式
 
@@ -328,10 +327,7 @@ class SkillLoader:
 
     搜索路径（优先级从高到低）:
       1. <cwd>/.vico/skills/
-      2. <cwd>/.agents/skills/        (跨工具兼容别名)
-      3. ~/.vico/skills/
-      4. ~/.agents/skills/            (跨工具兼容别名)
-      5. 内置 skills (package data)
+      2. ~/.vico/skills/
 
     同名 Skill 按优先级覆盖（高优先级遮蔽低优先级）。
     """
@@ -569,47 +565,47 @@ def on_skill_activated(self, meta: SkillMeta, content_len: int) -> None:
 
 ## 五、实现路线图
 
-### Phase 1：基础 Skill 支持（MVP）— 预计 2-3 天
+### Phase 1：基础 Skill 支持（MVP）— 已完成主体能力
 
 **目标**：用户可以将 SKILL.md 放到 `.vico/skills/<name>/` 目录，Vico 自动发现并将摘要注入系统提示词，模型可以通过 `activate_skill` 工具激活 Skill。
 
 | 任务 | 文件 | 复杂度 |
 |------|------|--------|
-| 创建 `SkillMeta`、`SkillContent` 数据类 | `src/vico/skills/models.py` | 低 |
-| 实现 `SkillLoader` 扫描与解析 | `src/vico/skills/loader.py` | 中 |
-| 实现 `ActivateSkillTool` | `src/vico/skills/activate_tool.py` | 中 |
-| 改造 `build_system_prompt()` 注入 Skill 摘要 | `core/system_prompt.py` | 低 |
-| 改造 `Agent.md` 模板 | `prompts/Agent.md` | 低 |
-| 改造 `AgentLoop` 注册 `activate_skill` 工具 | `core/agent_loop.py` | 低 |
-| 新增 `/skills` 命令 | `cli/__init__.py` | 低 |
-| 新增 `on_skill_activated` 渲染 | `cli/renderer.py` | 低 |
-| 更新 `AgentCallbacks` | `core/agent_loop.py` | 低 |
+| 创建 `SkillMeta`、`SkillContent` 数据类 | `src/vico/skills/types/meta.py` | 已完成 |
+| 实现 `SkillLoader` 扫描与解析 | `src/vico/skills/loader.py` | 已完成 |
+| 实现 `ActivateSkillTool` | `src/vico/tools/activate_skill.py` | 已完成 |
+| 改造 `build_system_prompt()` 注入 Skill 摘要 | `core/system_prompt.py` | 已完成 |
+| 改造 `Agent.md` 模板 | `prompts/Agent.md` | 已完成 |
+| 注册 `activate_skill` 工具 | `cli/session.py` | 已完成 |
+| 新增 `/skills` 命令 | `cli/commands.py` | 已完成 |
+| 新增 `on_skill_activated` 渲染 | `cli/session.py` | 已完成 |
+| 更新 `AgentCallbacks` | `core/types/callbacks.py` | 已完成 |
 
 **验收标准**：
-- [ ] 在 `.vico/skills/code-review/SKILL.md` 放置 Skill 文件
-- [ ] `vico` 启动后，`/skills` 命令显示该 Skill
-- [ ] 告诉 Vico "帮我 review 这段代码"，模型自动调用 `activate_skill`
-- [ ] 终端显示 Skill 激活面板，之后 Vico 使用 Skill 中的专业指令执行任务
+- [x] 在 `.vico/skills/code-review/SKILL.md` 放置 Skill 文件
+- [x] `vico` 启动后，`/skills` 命令显示该 Skill
+- [x] 告诉 Vico "帮我 review 这段代码"，模型可自动调用 `activate_skill`
+- [x] 终端显示 Skill 激活提示，之后 Vico 使用 Skill 中的专业指令执行任务
 
 ---
 
-### Phase 2：Skill 增强能力 — 预计 2-3 天
+### Phase 2：Skill 增强能力 — 部分完成
 
 **目标**：支持动态命令注入、参数替换、变量替换、`/skill <name> [args]` 手动触发。
 
 | 任务 | 文件 | 复杂度 |
 |------|------|--------|
 | 实现 `!`cmd`` 动态命令执行 | `skills/loader.py` | 中 |
-| 实现 `$ARGUMENTS`、`${VICO_SKILL_DIR}` 变量替换 | `skills/loader.py` | 低 |
-| 支持 `/skill <name> [args]` 手动触发命令 | `cli/__init__.py` | 低 |
-| 支持 `disable-model-invocation` frontmatter | `skills/activate_tool.py` | 低 |
-| 支持 `user-invocable: false` frontmatter | `skills/loader.py` | 低 |
-| 支持 `allowed-tools` frontmatter（临时扩展工具权限） | `core/permission_controller.py` | 中 |
+| 实现 `$ARGUMENTS`、`${VICO_SKILL_DIR}`、`${VICO_CWD}` 变量替换 | `core/agent_loop.py` | 已完成 |
+| 支持 `/skill <name> [args]` 手动触发命令 | `cli/commands.py` | 已完成 |
+| 支持 `disable-model-invocation` frontmatter | `tools/activate_skill.py` | 已完成 |
+| 支持 `user-invocable: false` frontmatter | `skills/loader.py` | 已完成 |
+| 支持 `allowed-tools` frontmatter（临时扩展工具权限） | `core/permission_controller.py` | 未开始 |
 
 **验收标准**：
 - [ ] SKILL.md body 中的 `` !`git log --oneline -5` `` 在激活时自动执行并内联
-- [ ] `/skill deploy production` 将 `production` 作为 `$ARGUMENTS` 传入 Skill 正文
-- [ ] `disable-model-invocation: true` 的 Skill 模型无法自动激活，仅用户 `/skill` 可触发
+- [x] `/skill deploy production` 将 `production` 作为 `$ARGUMENTS` 传入 Skill 正文
+- [x] `disable-model-invocation: true` 的 Skill 模型无法自动激活，仅用户 `/skill` 可触发
 
 ---
 

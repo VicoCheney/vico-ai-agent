@@ -1,13 +1,14 @@
 """Agent Loop — think → act → observe engine.
 
-Skill activation: when the LLM emits ``<use_skill>SKILL_ID</use_skill>`` in its
-response, _loop() loads the skill body, injects it as a user message, and
-continues to the next LLM turn.
+Skill activation primarily flows through the structured ``activate_skill`` tool.
+The legacy ``<use_skill>SKILL_ID</use_skill>`` text tag remains supported for
+backward compatibility.
 """
 
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import re
@@ -31,6 +32,7 @@ from vico.llm.types.stream import (
     TextChunk,
     ToolCallChunk,
 )
+from vico.skills.types.meta import SkillContent
 from vico.tools.registry import ToolRegistry
 from vico.tools.types.call import ToolCall
 from vico.tools.types.execution import ToolExecutionContext, ToolResult
@@ -163,10 +165,33 @@ class AgentLoop:
                     content=result.output if result.success else (result.error or "Unknown error"),
                     is_error=not result.success,
                 )
+                self._maybe_inject_skill_from_tool_result(result)
 
             self._context.maybe_compress(self._system_prompt)
 
     # ─── Skill Injection ──────────────────────────────────────────────────────
+
+    def _format_skill_instructions(self, content: SkillContent, arguments: str = "") -> str:
+        args_block = f"\n<skill_arguments>\n{arguments}\n</skill_arguments>\n" if arguments else ""
+        skill_id = html.escape(content.meta.skill_id, quote=True)
+        name = html.escape(content.meta.name, quote=True)
+        source = html.escape(content.meta.source, quote=True)
+        path = html.escape(str(content.meta.skill_dir), quote=True)
+        body = (
+            content.body
+            .replace("$ARGUMENTS", arguments)
+            .replace("${VICO_SKILL_DIR}", str(content.meta.skill_dir))
+            .replace("${VICO_CWD}", self._config.cwd)
+        )
+        return (
+            f'<skill_instructions id="{skill_id}" '
+            f'name="{name}" '
+            f'source="{source}" '
+            f'path="{path}">\n'
+            f"{args_block}"
+            f"{body}\n"
+            "</skill_instructions>"
+        )
 
     def _maybe_inject_skill(self, text: str) -> bool:
         """Detect <use_skill>ID</use_skill> tag and inject the skill body.
@@ -198,9 +223,7 @@ class AgentLoop:
             )
             return True
 
-        self._context.add_user_message(
-            f"[Skill: {content.meta.name}]\n\n{content.body}"
-        )
+        self._context.add_user_message(self._format_skill_instructions(content))
         logger.info("Injected skill %r (%d chars).", skill_id, len(content.body))
 
         cb = self._callbacks.on_skill_activated
@@ -209,7 +232,7 @@ class AgentLoop:
 
         return True
 
-    def inject_skill_by_id(self, skill_id: str) -> bool:
+    def inject_skill_by_id(self, skill_id: str, arguments: str = "") -> bool:
         """Inject a skill by ID (user-triggered via /skill command).
 
         Bypasses disable_model_invocation — user explicitly requested it.
@@ -222,9 +245,7 @@ class AgentLoop:
         if not content:
             return False
 
-        self._context.add_user_message(
-            f"[Skill: {content.meta.name}]\n\n{content.body}"
-        )
+        self._context.add_user_message(self._format_skill_instructions(content, arguments=arguments))
         logger.info("User-injected skill %r (%d chars).", skill_id, len(content.body))
 
         cb = self._callbacks.on_skill_activated
@@ -232,6 +253,27 @@ class AgentLoop:
             cb(content.meta)
 
         return True
+
+    def _maybe_inject_skill_from_tool_result(self, result: ToolResult) -> None:
+        """Inject skill instructions requested by the activate_skill tool."""
+        if not result.success or not result.metadata.get("skill_activation"):
+            return
+
+        if self._skill_loader is None:
+            return
+
+        skill_id = str(result.metadata.get("skill_id", ""))
+        content = self._skill_loader.get_skill_content(skill_id)
+        if not content:
+            return
+
+        arguments = str(result.metadata.get("skill_arguments", ""))
+        self._context.add_user_message(self._format_skill_instructions(content, arguments=arguments))
+        logger.info("Tool-injected skill %r (%d chars).", skill_id, len(content.body))
+
+        cb = self._callbacks.on_skill_activated
+        if cb:
+            cb(content.meta)
 
     # ─── LLM Streaming ────────────────────────────────────────────────────────
 

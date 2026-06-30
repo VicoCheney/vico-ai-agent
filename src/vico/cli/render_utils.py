@@ -24,7 +24,7 @@ __all__ = [
 
 # Priority order of parameter keys to display in tool call summaries.
 # Shared by permission_box.py and tool_format.py to keep behaviour consistent.
-PRIORITY_PARAM_KEYS: tuple[str, ...] = ("command", "path", "query", "pattern", "url", "file")
+PRIORITY_PARAM_KEYS: tuple[str, ...] = ("command", "skill_id", "path", "query", "pattern", "url", "file")
 
 
 # ─── I/O helpers ─────────────────────────────────────────────────────────────

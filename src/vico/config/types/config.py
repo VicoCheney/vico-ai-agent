@@ -13,10 +13,10 @@ DEFAULT_MAX_TOKENS = 131072
 
 @dataclass
 class LLMConfig:
-    provider: str = "mimo"
+    provider: str = "deepseek"
     api_key: str = ""
-    base_url: str = "https://token-plan-sgp.xiaomimimo.com/v1"
-    model: str = "mimo-v2.5-pro"
+    base_url: str = "https://api.deepseek.com"
+    model: str = "deepseek-v4-flash"
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = 1.0
     top_p: float | None = None
@@ -24,7 +24,7 @@ class LLMConfig:
     thinking_enabled: bool = True
     # Provider-specific parameters (e.g. reasoning_effort for DeepSeek,
     # response_format for any provider that supports it).
-    provider_options: dict = field(default_factory=dict)  # type: ignore[type-arg]
+    provider_options: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass

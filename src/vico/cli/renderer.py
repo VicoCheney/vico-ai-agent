@@ -145,6 +145,7 @@ class TerminalRenderer:
 
         # Optional callback: (ToolCall) -> bool — True means auto-approved
         self._permissions_checker: Callable[[ToolCall], bool] | None = None
+        self._skill_paths: dict[str, str] = {}
 
     def set_model_label(self, provider: str, model: str) -> None:
         self._model_label = f"({provider}/{model})"
@@ -154,6 +155,9 @@ class TerminalRenderer:
 
     def set_permissions_checker(self, checker: Callable[[ToolCall], bool]) -> None:
         self._permissions_checker = checker
+
+    def set_skill_paths(self, skill_paths: dict[str, str]) -> None:
+        self._skill_paths = skill_paths
 
     # ── Session UI ─────────────────────────────────────────────────────────
 
@@ -263,7 +267,7 @@ class TerminalRenderer:
         self._stop_live(finalize=True)
         self._end_thinking_compact()
 
-        name, param = tool_label(tool_call, cwd=self._cwd)
+        name, param = tool_label(tool_call, cwd=self._cwd, skill_paths=self._skill_paths)
         idx = self._tools.size
         self._tools.batch[tool_call.id] = (idx, name, param)
         self._tools.size += 1

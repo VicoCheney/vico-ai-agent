@@ -14,3 +14,4 @@ build/
 *.vicorc.local.json
 .codeflicker/
 .vico/
+.qoder/

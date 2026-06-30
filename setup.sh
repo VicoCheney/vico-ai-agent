@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  Vico AI Agent — 一键安装 & 启动脚本（幂等版）
-#  用法：bash setup.sh [--global] [--no-launch]
-#    --global     同时执行全局安装（任意目录可直接运行 vico）
+#  用法：bash setup.sh [--no-global] [--no-launch]
+#    --no-global  跳过全局安装（默认执行全局安装）
 #    --no-launch  完成安装后不自动启动
 # =============================================================================
 #
@@ -11,7 +11,7 @@
 #    • uv        ── 已安装则跳过，不重新下载
 #    • uv sync   ── .venv 存在且与 uv.lock 一致则跳过（--frozen 检查）
 #    • .env      ── 已存在则跳过复制；已有有效 key 则不再提示输入
-#    • 全局安装  ── 已安装且版本一致则跳过（--global 参数显式触发除外不重装）
+#    • 全局安装  ── 已安装且版本一致则跳过
 #
 # =============================================================================
 
@@ -35,15 +35,15 @@ dim()  { echo -e "${DIM}   $*${RESET}"; }
 skip() { echo -e "${DIM}⟳  $* — 已是最新，跳过${RESET}"; }
 
 # ─── 参数解析 ─────────────────────────────────────────────────────────────
-GLOBAL_INSTALL=false
+GLOBAL_INSTALL=true
 AUTO_LAUNCH=true
 for arg in "$@"; do
   case "$arg" in
-    --global)    GLOBAL_INSTALL=true ;;
+    --no-global) GLOBAL_INSTALL=false ;;
     --no-launch) AUTO_LAUNCH=false ;;
     -h|--help)
-      echo "用法: bash setup.sh [--global] [--no-launch]"
-      echo "  --global      安装完成后执行全局安装（任意目录可用 vico 命令）"
+      echo "用法: bash setup.sh [--no-global] [--no-launch]"
+      echo "  --no-global   跳过全局安装（默认全局安装，任意目录可用 vico 命令）"
       echo "  --no-launch   安装完成后不自动启动 vico"
       exit 0
       ;;
@@ -201,28 +201,15 @@ if ! $HAS_KEY; then
   echo -e "${YELLOW}${BOLD}  需要配置 API Key 才能使用 Vico${RESET}"
   echo ""
   echo -e "  选择你的 Provider（只需填一个）："
-  echo -e "  ${BOLD}1) MiMo${RESET}（默认）  —  https://platform.xiaomimimo.com"
-  echo -e "     控制台 → Token Plan → 创建 API Key（格式：tp-xxxxx）"
-  echo -e "  ${BOLD}2) DeepSeek${RESET}      —  https://platform.deepseek.com"
+  echo -e "  ${BOLD}1) DeepSeek${RESET}（默认）  —  https://platform.deepseek.com"
   echo -e "     API Keys → 创建（格式：sk-xxxxx）"
+  echo -e "  ${BOLD}2) MiMo${RESET}        —  https://platform.xiaomimimo.com"
+  echo -e "     控制台 → Token Plan → 创建 API Key（格式：tp-xxxxx）"
   echo ""
 
   if [[ -t 0 ]]; then
     # 交互式：循环直到填入至少一个有效 key
     while ! $HAS_KEY; do
-      echo -ne "  请输入 MiMo API Key（留空跳过）: "
-      read -r INPUT_MIMO
-      if [[ -n "$INPUT_MIMO" ]] && [[ "$INPUT_MIMO" != *"your-"* ]]; then
-        if grep -q "^MIMO_API_KEY=" .env 2>/dev/null; then
-          sed -i.bak "s|^MIMO_API_KEY=.*|MIMO_API_KEY=${INPUT_MIMO}|" .env && rm -f .env.bak
-        else
-          echo "MIMO_API_KEY=${INPUT_MIMO}" >> .env
-        fi
-        ok "MiMo API Key 已写入 .env"
-        HAS_KEY=true
-        break
-      fi
-
       echo -ne "  请输入 DeepSeek API Key（留空跳过）: "
       read -r INPUT_DEEPSEEK
       if [[ -n "$INPUT_DEEPSEEK" ]] && [[ "$INPUT_DEEPSEEK" != *"your-"* ]]; then
@@ -232,16 +219,29 @@ if ! $HAS_KEY; then
           echo "DEEPSEEK_API_KEY=${INPUT_DEEPSEEK}" >> .env
         fi
         ok "DeepSeek API Key 已写入 .env"
-        # 切换 .vicorc.json 默认 provider（幂等：用 python 原子改写）
+        HAS_KEY=true
+        break
+      fi
+
+      echo -ne "  请输入 MiMo API Key（留空跳过）: "
+      read -r INPUT_MIMO
+      if [[ -n "$INPUT_MIMO" ]] && [[ "$INPUT_MIMO" != *"your-"* ]]; then
+        if grep -q "^MIMO_API_KEY=" .env 2>/dev/null; then
+          sed -i.bak "s|^MIMO_API_KEY=.*|MIMO_API_KEY=${INPUT_MIMO}|" .env && rm -f .env.bak
+        else
+          echo "MIMO_API_KEY=${INPUT_MIMO}" >> .env
+        fi
+        ok "MiMo API Key 已写入 .env"
+        # 切换 .vicorc.json 默认 provider 为 mimo
         if command -v python3 &>/dev/null && [[ -f ".vicorc.json" ]]; then
           python3 - <<'PYEOF'
 import json
 with open('.vicorc.json') as f: cfg = json.load(f)
 cfg.setdefault('llm', {}).setdefault('default', {})
-cfg['llm']['default']['provider'] = 'deepseek'
-cfg['llm']['default']['model']    = 'deepseek-v4-flash'
+cfg['llm']['default']['provider'] = 'mimo'
+cfg['llm']['default']['model']    = 'mimo-v2.5'
 with open('.vicorc.json', 'w') as f: json.dump(cfg, f, indent=2, ensure_ascii=False)
-print('   → .vicorc.json 已切换为 deepseek provider')
+print('   → .vicorc.json 已切换为 mimo provider')
 PYEOF
         fi
         HAS_KEY=true
@@ -255,13 +255,13 @@ PYEOF
     # 非交互环境（CI / 管道）
     warn "非交互环境，无法提示输入 Key"
     warn "请手动编辑 .env 文件，填入 MIMO_API_KEY 或 DEEPSEEK_API_KEY"
-    warn "然后运行 'uv run vico' 启动"
+    warn "然后运行 'vico' 启动"
     AUTO_LAUNCH=false
   fi
 fi
 
 # =============================================================================
-# Step 5: （可选）全局安装
+# Step 5: 全局安装（默认执行，--no-global 跳过）
 # =============================================================================
 step "Step 5 / 全局安装"
 
@@ -270,7 +270,6 @@ if $GLOBAL_INSTALL; then
   LOCAL_VER="$(grep -E '^version\s*=' pyproject.toml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
   INSTALLED_VER=""
   if command -v vico &>/dev/null; then
-    # 尝试获取已安装版本（若 vico 不支持 --version 则为空）
     INSTALLED_VER="$(uv tool list 2>/dev/null | grep 'vico-ai-agent' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
   fi
 
@@ -283,7 +282,7 @@ if $GLOBAL_INSTALL; then
       || warn "全局安装失败，仍可用 'uv run vico' 在项目目录内启动"
   fi
 else
-  dim "已跳过全局安装（使用 --global 参数启用）"
+  dim "已跳过全局安装（去掉 --no-global 参数即可启用）"
   dim "全局安装后可在任意目录直接运行 vico 命令"
 fi
 
@@ -321,5 +320,5 @@ if $AUTO_LAUNCH && $HAS_KEY; then
     exec uv run vico
   fi
 elif ! $HAS_KEY; then
-  warn "未检测到有效的 API Key，请编辑 .env 文件后手动运行 'uv run vico'"
+  warn "未检测到有效的 API Key，请编辑 .env 文件后手动运行 'vico'"
 fi

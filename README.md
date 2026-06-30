@@ -5,13 +5,14 @@
 ## 功能特性
 
 - 🔄 **Agent Loop** — Think → Act → Observe 循环，支持多轮工具调用
-- 📋 **Planning Phase** — 复杂任务前置规划，自动识别并批量调度独立工具调用（通过提示词引导，无独立 Planner LLM 调用）
-- 🔧 **5 个核心工具**：
+- 📋 **Prompt Planning** — 复杂任务通过系统提示词引导模型先输出 `<plan>`，无独立 Planner LLM 调用
+- 🔧 **6 个核心工具**：
   - `read` — 读取文件内容，支持行范围
   - `write` — 创建或覆盖文件（整文件写入，中风险）
   - `edit` — 精确字符串替换编辑文件（中风险）
   - `bash` — 执行 Shell 命令（高风险，需确认）
   - `search` — 正则搜索代码（优先使用 ripgrep）
+  - `activate_skill` — 结构化激活 Skill（低风险）
 - 🛡️ **权限控制** — 高风险操作前弹出确认框，支持"本次批准 / 本会话始终批准 / 拒绝"
 - 💭 **Thinking 展示** — 实时展示模型推理过程（动态 spinner + 摘要片段）
 - 🎨 **终端 UI** — 彩色 Spinner、比例对齐的工具执行行、Markdown 渲染
@@ -31,10 +32,12 @@ cd vico-ai-agent
 bash setup.sh
 ```
 
+脚本会自动完成全局安装，之后在任意目录直接运行 `vico` 即可。
+
 **可选参数：**
 
 ```bash
-bash setup.sh --global     # 同时全局安装，任意目录可直接运行 vico
+bash setup.sh --no-global  # 跳过全局安装，仅项目目录内可用（uv run vico）
 bash setup.sh --no-launch  # 完成安装后不自动启动
 bash setup.sh --help       # 查看所有参数说明
 ```
@@ -94,16 +97,16 @@ cp .env.example .env
 用任意文本编辑器打开 `.env`，填入你的 API Key：
 
 ```dotenv
-# 默认使用 MiMo（小米）作为 Provider，填入 MiMo Token Plan Key：
-MIMO_API_KEY=tp-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-# 如果想用 DeepSeek，填入 DeepSeek API Key：
+# 默认使用 DeepSeek 作为 Provider，填 DeepSeek API Key：
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# 如果想用 MiMo（小米），填 MiMo Token Plan Key：
+MIMO_API_KEY=tp-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 **获取 API Key**：
-- **MiMo**（默认）：[platform.xiaomimimo.com](https://platform.xiaomimimo.com) → 控制台 → Token Plan → 创建 API Key（格式 `tp-xxxxx`）
-- **DeepSeek**：[platform.deepseek.com](https://platform.deepseek.com) → API Keys → 创建（格式 `sk-xxxxx`）
+- **DeepSeek**（默认）：[platform.deepseek.com](https://platform.deepseek.com) → API Keys → 创建（格式 `sk-xxxxx`）
+- **MiMo**：[platform.xiaomimimo.com](https://platform.xiaomimimo.com) → 控制台 → Token Plan → 创建 API Key（格式 `tp-xxxxx`）
 
 > 只需填入你实际使用的那个 Provider 的 Key 即可。
 
@@ -113,13 +116,13 @@ DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 项目根目录的 `.vicorc.json` 控制默认 Provider / 模型和各项参数，默认已配置好，直接跳过也可以。
 
-如需切换默认 Provider 为 DeepSeek：
+如需切换默认 Provider 为 MiMo：
 
 ```json
 "llm": {
   "default": {
-    "provider": "deepseek",
-    "model": "deepseek-v4-flash"
+    "provider": "mimo",
+    "model": "mimo-v2.5"
   }
 }
 ```
@@ -129,8 +132,10 @@ DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ### 第 5 步：运行！
 
 ```bash
-uv run vico
+vico
 ```
+
+> 如果你不想全局安装，可以在项目目录内用 `uv run vico` 启动。
 
 看到 ASCII Logo 和提示符即表示启动成功，可以开始对话了。
 
@@ -149,37 +154,23 @@ uv run vico
 
 ---
 
-### 第 6 步：（可选）全局安装
-
-完成前 5 步后，`vico` 只能在项目目录内用 `uv run vico` 启动。若想在**任意目录**下直接使用 `vico` 命令，执行全局安装：
-
-```bash
-uv tool install . --force --editable
-# 或使用安装脚本：bash setup.sh --global
-```
-
-之后在终端任意位置输入 `vico` 即可启动：
-
-```bash
-cd ~/Desktop
-vico   # 👈 直接在桌面上启动 Vico
-```
-
-卸载：
+### 卸载
 
 ```bash
 uv tool uninstall vico-ai-agent
 ```
 
+---
+
 ## 执行策略
 
-Vico 采用 **Planning + 批量执行** 模型以减少 LLM 调用次数。
+Vico 采用 **Prompt Planning + 批量执行** 模型以减少 LLM 调用次数。
 
 ### Planning Protocol
 
-当用户的请求涉及 3 个以上工具调用，或明显是多步任务时，模型会在执行任何工具之前先在内部产出结构化的 `<plan>` 块（内部规划，不展示在终端）。
+当用户的请求涉及 3 个以上工具调用，或明显是多步任务时，系统提示词会要求模型在执行工具之前先产出结构化的 `<plan>` 块。
 
-`<plan>` 块中每个步骤标注 `[batch]`（可并行）或 `[seq]`（顺序依赖），模型据此在同一 LLM 轮次内批量发出多个工具调用：
+`<plan>` 块中每个步骤标注 `[batch]`（可并行）或 `[seq]`（顺序依赖）。这不是独立的 Planner 阶段，而是同一个 Agent Loop 中的文本规划，随后模型可在同一轮或后续轮次批量发出多个 structured tool calls：
 
 ```
 Steps:
@@ -192,6 +183,15 @@ Steps:
 
 AgentLoop 支持在单个 LLM 轮次内并发执行多个工具调用（`asyncio.gather`），将原来 O(N) 的 LLM round-trips 降低到接近 O(log N)。
 
+### Skill 懒加载
+
+Vico 会在启动时扫描 Skill 元数据，并将可用 Skill 摘要注入系统提示词。当前只支持以下路径：
+
+- `<cwd>/.vico/skills/<skill-id>/SKILL.md`
+- `~/.vico/skills/<skill-id>/SKILL.md`
+
+模型优先通过 `activate_skill` 工具请求加载 Skill 正文；`<use_skill>SKILL_ID</use_skill>` 仅作为兼容后备。用户也可以用 `/skill <skill-id> [arguments]` 手动激活。
+
 ---
 
 
@@ -203,6 +203,8 @@ AgentLoop 支持在单个 LLM 轮次内并发执行多个工具调用（`asyncio
 | `/help` | 显示帮助和可用命令 |
 | `/model` | 查看当前 Provider / 模型 |
 | `/model <provider/model>` | 切换 Provider / 模型（运行时热切换）示例：`/model deepseek/deepseek-v4-flash` |
+| `/skills` | 查看当前可用 Skill |
+| `/skill <id> [arguments]` | 手动激活指定 Skill，并可传入参数 |
 | `/clear` | 清空对话历史，开启新会话 |
 | `/exit` 或 `Ctrl+D` | 退出 |
 | `Ctrl+C` | 中断当前正在执行的任务（再按一次退出） |
@@ -239,6 +241,9 @@ src/vico/
 │   ├── permission_controller.py  # 工具执行权限控制
 │   ├── prompt_loader.py          # Jinja2 系统提示词加载器
 │   └── system_prompt.py          # 系统提示词构建（变量注入）
+├── skills/
+│   ├── loader.py                 # .vico/skills 扫描 + SKILL.md 解析
+│   └── types/                    # Skill 元数据类型
 ├── llm/
 │   ├── llm_factory.py            # Provider 工厂（读取 .vicorc.json）
 │   ├── models.py                 # 支持的模型注册表
@@ -255,9 +260,12 @@ src/vico/
 │   ├── edit.py                   # edit 工具
 │   └── search.py                 # search 工具（ripgrep / grep）
 ├── cli/
-│   ├── __init__.py               # CLI 入口 + REPL 主循环
+│   ├── __init__.py               # CLI 入口
+│   ├── repl.py                   # REPL 主循环
+│   ├── commands.py               # /help /model /skills /skill 等命令
 │   └── renderer.py               # 终端 UI 渲染器
-└── config.py                     # 配置加载（.env + .vicorc.json）
+└── config/
+    └── loader.py                 # 配置加载（.env + .vicorc.json）
 ```
 
 ---
@@ -297,7 +305,11 @@ src/vico/
   },
   "tools": {
     "auto_approve": ["low", "medium"],  // 自动批准的风险级别（low=read/search，medium=write/edit）
-    "timeout_ms": 30000                 // 工具执行超时（毫秒）
+    "timeout_ms": 30000,                // 工具执行超时（毫秒）
+    "env_whitelist": ["PATH", "HOME", "SHELL", "LANG", "TERM"]
+  },
+  "limits": {
+    "max_iterations": 30
   }
 }
 ```

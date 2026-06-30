@@ -47,8 +47,8 @@
   },
   "llm": {
     "default": {
-      "provider": "mimo",
-      "model": "mimo-v2.5"
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash"
     }
   },
   "context": {
@@ -57,9 +57,18 @@
     "compression_threshold": 0.85
   },
   "tools": {
-    "auto_approve": ["low", "medium"],
+    "auto_approve": [
+      "low",
+      "medium"
+    ],
     "timeout_ms": 30000,
-    "env_whitelist": ["PATH", "HOME", "SHELL", "LANG", "TERM"]
+    "env_whitelist": [
+      "PATH",
+      "HOME",
+      "SHELL",
+      "LANG",
+      "TERM"
+    ]
   },
   "limits": {
     "max_iterations": 30

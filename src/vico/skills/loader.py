@@ -3,9 +3,7 @@ Skill Loader — scans directories for SKILL.md files and parses them.
 
 Search paths (highest priority first):
   1. <cwd>/.vico/skills/<name>/SKILL.md
-  2. <cwd>/.agents/skills/<name>/SKILL.md   (cross-tool compatibility alias)
-  3. ~/.vico/skills/<name>/SKILL.md
-  4. ~/.agents/skills/<name>/SKILL.md
+  2. ~/.vico/skills/<name>/SKILL.md
 
 Skills with the same id are shadowed: higher-priority path wins.
 """
@@ -16,7 +14,7 @@ import logging
 import re
 from pathlib import Path
 
-from vico.skills.types.meta import SkillContent, SkillMeta
+from vico.skills.types.meta import SkillContent, SkillMeta, SkillSource
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +53,7 @@ def _parse_frontmatter(raw: str) -> tuple[dict[str, str], str]:
             key = kv.group(1).lower().replace("-", "_")
             value = kv.group(2).strip()
 
-            if value == "|":
+            if value in ("|", ""):
                 current_key = key
             else:
                 result[key] = value
@@ -64,7 +62,7 @@ def _parse_frontmatter(raw: str) -> tuple[dict[str, str], str]:
             multiline_lines.append(line.lstrip("  ") if line.startswith("  ") else line)
 
     # Flush last multiline key
-    if current_key and multiline_lines:
+    if current_key:
         result[current_key] = "\n".join(multiline_lines).strip()
 
     return result, body
@@ -72,6 +70,25 @@ def _parse_frontmatter(raw: str) -> tuple[dict[str, str], str]:
 
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in ("true", "yes", "1")
+
+
+def _parse_list(value: str) -> list[str]:
+    """Parse a simple YAML-ish inline or block list."""
+    raw = value.strip()
+    if not raw:
+        return []
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+        return [item.strip().strip("\"'") for item in raw.split(",") if item.strip()]
+    lines = raw.splitlines()
+    result: list[str] = []
+    for line in lines:
+        item = line.strip()
+        if item.startswith("-"):
+            item = item[1:].strip()
+        if item:
+            result.append(item.strip("\"'"))
+    return result
 
 
 class SkillLoader:
@@ -148,17 +165,18 @@ class SkillLoader:
         """Scan a single base directory for <name>/SKILL.md entries."""
         if not base.is_dir():
             return
+        source: SkillSource = "project" if base == self._cwd / ".vico" / "skills" else "user"
         for entry in sorted(base.iterdir()):
             if not entry.is_dir():
                 continue
             skill_id = entry.name
             if skill_id in self._skills:
                 continue
-            meta = self._parse_skill_md(entry)
+            meta = self._parse_skill_md(entry, source=source)
             if meta:
                 self._skills[skill_id] = meta
 
-    def _parse_skill_md(self, skill_dir: Path) -> SkillMeta | None:
+    def _parse_skill_md(self, skill_dir: Path, source: SkillSource) -> SkillMeta | None:
         """Parse a SKILL.md file and return a SkillMeta, or None on failure."""
         skill_md = skill_dir / "SKILL.md"
         if not skill_md.exists():
@@ -185,5 +203,8 @@ class SkillLoader:
             argument_hint=fm.get("argument_hint", fm.get("argument-hint", "")).strip(),
             disable_model_invocation=_parse_bool(fm.get("disable_model_invocation", fm.get("disable-model-invocation", "false"))),
             user_invocable=_parse_bool(fm.get("user_invocable", fm.get("user-invocable", "true"))),
+            allowed_tools=_parse_list(fm.get("allowed_tools", fm.get("allowed-tools", ""))),
+            risk_level=fm.get("risk_level", fm.get("risk-level", "low")).strip() or "low",
+            source=source,
             skill_dir=skill_dir,
         )

@@ -23,8 +23,8 @@ from vico.core.context_manager import ContextManager
 from vico.core.permission_controller import PermissionController
 from vico.llm.llm_factory import create_llm_from_config
 from vico.skills.loader import SkillLoader
-from vico.skills.types.meta import SkillMeta
 from vico.tools import BUILTIN_TOOLS
+from vico.tools.activate_skill import ActivateSkillTool
 from vico.tools.registry import ToolRegistry
 from vico.tools.types.call import ToolCall
 
@@ -42,8 +42,12 @@ class VicoSession:
 
         # ── Build component graph ────────────────────────────────────────
         self._skill_loader = SkillLoader(cwd=config.cwd)
+        self._renderer.set_skill_paths(
+            {m.skill_id: str(m.skill_dir) for m in self._skill_loader.get_all_metas()}
+        )
         self._tool_registry = ToolRegistry()
         self._tool_registry.register_all(BUILTIN_TOOLS)
+        self._tool_registry.register(ActivateSkillTool(self._skill_loader))
 
         self._llm = create_llm_from_config(config)
 
@@ -92,12 +96,6 @@ class VicoSession:
                 tool_call, renderer, self._session, quit_event, self._agent.cancel_event
             )
 
-        def _on_skill_activated(meta: SkillMeta) -> None:
-            console.print(
-                f"  [cyan]\u25b6[/cyan]  Skill [bold cyan]{meta.name}[/bold cyan] activated — "
-                f"[dim]{meta.description.splitlines()[0]}[/dim]"
-            )
-
         return AgentCallbacks(
             on_thinking=renderer.on_thinking,
             on_text=renderer.on_text,
@@ -106,7 +104,7 @@ class VicoSession:
             on_error=renderer.on_error,
             on_done=lambda pt, ct: renderer.on_done_with_usage(pt, ct),
             on_loop=renderer.on_loop,
-            on_skill_activated=_on_skill_activated,
+            on_skill_activated=None,
             request_approval=_approval_cb,
         )
 

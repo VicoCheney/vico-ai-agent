@@ -7,6 +7,7 @@ All tools inherit from the ``Tool`` abstract base class defined in
 
 from __future__ import annotations
 
+from vico.tools.activate_skill import ActivateSkillTool
 from vico.tools.bash import BashTool
 from vico.tools.edit import EditTool
 from vico.tools.read import ReadTool
@@ -23,6 +24,7 @@ BUILTIN_TOOLS = [
 
 __all__ = [
     "BUILTIN_TOOLS",
+    "ActivateSkillTool",
     "BashTool",
     "EditTool",
     "ReadTool",

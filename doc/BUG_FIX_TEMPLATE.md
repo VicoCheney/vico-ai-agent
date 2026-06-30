@@ -32,11 +32,14 @@
 ```
 src/vico/
 ├── core/
-│   ├── types.py                  # ★ 所有核心类型（DataClass）唯一存放处
-│   ├── agent_loop.py             # Agent 主循环：Planning → Execute → Observe
+│   ├── types/                    # 核心消息、回调、Agent 状态类型
+│   ├── agent_loop.py             # Agent 主循环：Think → Act → Observe
 │   ├── context_manager.py        # 会话上下文管理 + Token 压缩（in-memory）
 │   ├── permission_controller.py  # 工具执行权限控制
-│   └── system_prompt.py          # Executor + Planner 两套 Prompt 构建
+│   └── system_prompt.py          # 系统 Prompt 构建与 Skill 摘要注入
+├── skills/
+│   ├── loader.py                 # .vico/skills 扫描 + SKILL.md 解析
+│   └── types/                    # Skill 元数据类型
 ├── llm/
 │   ├── llm_factory.py            # Provider 工厂（读取 .vicorc.json）
 │   ├── models.py                 # 支持的模型注册表
@@ -49,28 +52,31 @@ src/vico/
 │   ├── registry.py               # ToolRegistry：注册表 + 调度器
 │   ├── read.py / write.py / edit.py / bash.py / search.py
 ├── cli/
-│   ├── __init__.py               # CLI REPL 主循环 + /命令 分发
+│   ├── __init__.py               # CLI 入口
+│   ├── repl.py                   # REPL 主循环
+│   ├── commands.py               # /命令分发
 │   └── renderer.py               # 终端 UI：Spinner / Thinking / Markdown 渲染
-└── config.py                     # 配置加载（.env + .vicorc.json）
+└── config/
+    └── loader.py                 # 配置加载（.env + .vicorc.json）
 ```
 
 **Agent 调用链**：
 ```
 CLI REPL (__init__.py)
   └─ AgentLoop.run(user_input)          # agent_loop.py
-       ├─ [可选] _run_planning_phase()  # 无工具的 Planner LLM
        └─ _loop(max_iterations)
             ├─ LLM.stream(request)      # llm/providers/
             ├─ ContextManager.add_*()   # context_manager.py
-            └─ ToolRegistry.execute()   # tools/registry.py → tools/*.py
+            ├─ ToolRegistry.execute()   # tools/registry.py → tools/*.py
+            └─ SkillLoader.get_skill_content()  # 按需注入 .vico/skills
 ```
 
 **关键开发约定**：
-- 跨模块共享的数据契约（两个及以上模块依赖）→ `src/vico/core/types.py`
+- 跨模块共享的数据契约（两个及以上模块依赖）→ `src/vico/core/types/`
   - 例：`Message`、`ToolCall`、`AgentConfig`、`AgentCallbacks`、`SkillMeta`
   - **不属于此处**：仅单个模块内部使用的配置类（如 `DeepSeekConfig`、`MiMoConfig`），应放在该模块自己的文件中
 - 新工具 → 继承 `Tool` 抽象基类，放 `src/vico/tools/<name>.py`，在 `tools/__init__.py` 的 `BUILTIN_TOOLS` 追加实例
-- 新 CLI 命令 → 在 `src/vico/cli/__init__.py` 命令分发处添加
+- 新 CLI 命令 → 优先在 `src/vico/cli/commands.py` 添加处理函数，并在 `src/vico/cli/repl.py` 接入分发
 - 配置扩展 → 新增字段到 `AgentConfig`（types.py），同步更新 `.vicorc.json` 示例和 `README.md`
 - 工具风险级别：`low`（只读，自动执行）/ `medium`（写文件，需确认）/ `high`（Shell，需确认）
 
@@ -108,7 +114,7 @@ CLI REPL (__init__.py)
 
 4. 🔒 **安全规范**：API Key、Token 等敏感信息必须通过 `.env` 环境变量传入，不得硬编码在源码中。
 
-5. ✅ **质量门禁**：修复完成后必须确保以下全部通过：
+5. ✅ **质量门禁**：修复完成后优先确保以下静态检查通过；本项目暂时不要求新增测试代码或测试覆盖：
    - `uv run ruff check src/` — 无 lint 错误
    - `uv run ruff format src/` — 代码已格式化
    - `uv run mypy src/vico` — 无类型错误
