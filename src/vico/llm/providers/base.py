@@ -81,7 +81,12 @@ class OpenAICompatibleLLM(LLM):
         result.append({"role": "system", "content": request.system})
 
         for msg in request.messages:
-            if msg.role == "user":
+            if msg.role == "system":
+                note = msg.content if isinstance(msg.content, str) else ""
+                if note:
+                    result[0]["content"] = f"{result[0]['content']}\n\n{note}"
+
+            elif msg.role == "user":
                 if isinstance(msg.content, str):
                     content = msg.content
                 else:

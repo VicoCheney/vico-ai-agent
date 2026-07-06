@@ -133,11 +133,12 @@ class ContextManager:
     # ─── Context Compression ──────────────────────────────────────────────
 
     def maybe_compress(self, system_prompt: str) -> bool:
-        """Compress context if approaching the token limit.
+        """Truncate context if approaching the token limit.
 
-        Walks backwards keeping recent messages within budget. Uses role="system"
-        for the summary message to avoid violating user/assistant alternation rules.
-        Returns True if compression occurred.
+        Walks backwards keeping recent message units within budget. Assistant
+        tool calls and their following tool results are kept together so the
+        provider never receives orphaned tool messages.
+        Returns True if truncation occurred.
         """
         total = self.estimate_total_tokens(system_prompt)
         budget = self._max_tokens - self._reserve_tokens
@@ -150,32 +151,39 @@ class ContextManager:
         if recent_budget <= 0:
             recent_budget = max(1, budget // 4)
 
-        kept: list[Message] = []
+        units = self._message_units()
+        kept_units: list[list[Message]] = []
         used = 0
-        for msg in reversed(self._messages):
-            msg_tokens = self.estimate_message_tokens(msg)
-            if used + msg_tokens > recent_budget and kept:
+        for unit in reversed(units):
+            if self._is_orphan_tool_unit(unit):
+                continue
+            unit_tokens = sum(self.estimate_message_tokens(msg) for msg in unit)
+            if used + unit_tokens > recent_budget and kept_units:
                 break
-            kept.insert(0, msg)
-            used += msg_tokens
+            kept_units.insert(0, unit)
+            used += unit_tokens
 
+        kept = [msg for unit in kept_units for msg in unit]
         removed_count = len(self._messages) - len(kept)
 
-        # Dead-loop guard: if nothing was removed, force-keep only the last 2 messages.
-        if removed_count <= 0:
-            if len(self._messages) <= 2:
-                logger.warning(
-                    "ContextManager: cannot compress further (%d messages remain).",
-                    len(self._messages),
-                )
-                return False
-            kept = self._messages[-2:]
+        if not kept:
+            for unit in reversed(units):
+                if not self._is_orphan_tool_unit(unit):
+                    kept = list(unit)
+                    break
             removed_count = len(self._messages) - len(kept)
+
+        if removed_count <= 0:
+            logger.warning(
+                "ContextManager: cannot compress further (%d messages remain).",
+                len(self._messages),
+            )
+            return False
 
         summary = Message(
             role="system",
             content=(
-                f"[Context note: {removed_count} earlier messages were summarized to save space. "
+                f"[Context note: {removed_count} earlier messages were omitted to stay within budget. "
                 "The conversation continues below.]"
             ),
             id=self._gen_id(),
@@ -183,6 +191,53 @@ class ContextManager:
         )
         self._messages = [summary, *kept]
         return True
+
+    def _message_units(self) -> list[list[Message]]:
+        """Group assistant tool calls with their immediate tool results."""
+        units: list[list[Message]] = []
+        i = 0
+        while i < len(self._messages):
+            msg = self._messages[i]
+            if self._has_tool_use(msg):
+                unit = [msg]
+                i += 1
+                while i < len(self._messages) and self._messages[i].role == "tool":
+                    unit.append(self._messages[i])
+                    i += 1
+                units.append(unit)
+                continue
+            units.append([msg])
+            i += 1
+        return units
+
+    @staticmethod
+    def _has_tool_use(msg: Message) -> bool:
+        return isinstance(msg.content, list) and any(isinstance(block, ToolUseBlock) for block in msg.content)
+
+    @staticmethod
+    def _is_orphan_tool_unit(unit: list[Message]) -> bool:
+        return bool(unit) and unit[0].role == "tool"
+
+    def debug_messages(self, limit: int = 12) -> list[dict[str, str | int]]:
+        """Return a compact tail of messages for CLI diagnostics."""
+        rows: list[dict[str, str | int]] = []
+        for msg in self._messages[-limit:]:
+            if isinstance(msg.content, str):
+                preview = msg.content
+            else:
+                preview = " ".join(block.type for block in msg.content)
+            preview = preview.replace("\n", " ").strip()
+            if len(preview) > 120:
+                preview = preview[:117] + "..."
+            rows.append(
+                {
+                    "role": msg.role,
+                    "id": msg.id,
+                    "chars": len(preview),
+                    "preview": preview,
+                }
+            )
+        return rows
 
     # ─── Stats ────────────────────────────────────────────────────────────
 

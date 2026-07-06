@@ -7,16 +7,18 @@ and each command is independently importable / testable.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from rich.console import Console
 
-from vico.config import lookup_provider
-from vico.config.types.config import AgentConfig, LLMConfig
+from vico.config import load_llm_config
+from vico.config.types.config import AgentConfig, ContextStats
 from vico.core.agent_loop import AgentLoop
 from vico.core.permission_controller import PermissionController
 from vico.exceptions import VicoError
+from vico.llm.base import LLM
 from vico.llm.llm_factory import create_llm_from_config
 from vico.skills.loader import SkillLoader
 
@@ -42,6 +44,8 @@ def print_help() -> None:
         ("/model <p/m>", "Switch model  e.g. deepseek/deepseek-v4-pro"),
         ("/skills", "List all available skills"),
         ("/skill <id> [args]", "Manually activate a skill with optional arguments"),
+        ("/yolo", "Auto-approve all tools for this session"),
+        ("/debug <topic>", "Show runtime diagnostics: context/tools/approvals/skills"),
         ("/help", "Show this message"),
         ("/exit", "Exit Vico"),
     ]
@@ -113,6 +117,94 @@ def handle_skill_command(user_input: str, agent: AgentLoop, skill_loader: SkillL
         handle_skills_command(skill_loader)
 
 
+# ─── /yolo ───────────────────────────────────────────────────────────────────
+
+
+def handle_yolo_command(permissions: PermissionController) -> None:
+    permissions.enable_yolo_mode()
+    console.print("  [green]✓[/green]  YOLO mode enabled for this session.")
+    console.print("  [yellow]All subsequent tool calls will run without approval prompts.[/yellow]")
+
+
+# ─── /debug ──────────────────────────────────────────────────────────────────
+
+
+def handle_debug_command(
+    user_input: str,
+    agent: AgentLoop,
+    permissions: PermissionController,
+    skill_loader: SkillLoader | None = None,
+) -> None:
+    parts = user_input.split(maxsplit=1)
+    topic = parts[1].strip() if len(parts) > 1 else "help"
+    snapshot = agent.debug_snapshot()
+
+    if topic == "context":
+        stats = cast(ContextStats, snapshot["context"])
+        messages = cast(list[dict[str, str | int]], snapshot["messages"])
+        console.print()
+        console.print("[bold]  Debug: Context[/bold]")
+        console.print(
+            f"  [dim]state[/dim]     [cyan]{snapshot['state']}[/cyan]\n"
+            f"  [dim]messages[/dim]  [cyan]{stats.message_count}[/cyan]\n"
+            f"  [dim]tokens[/dim]    [cyan]{stats.estimated_tokens}/{stats.max_tokens}[/cyan]\n"
+            f"  [dim]usage[/dim]     [cyan]{stats.usage_percent:.1f}%[/cyan]"
+        )
+        console.print("  [dim]recent messages[/dim]")
+        for msg in messages:
+            console.print(
+                f"    [cyan]{str(msg['role']):<9}[/cyan] "
+                f"[dim]{msg['id']}[/dim]  {msg['preview']}"
+            )
+        console.print()
+        return
+
+    if topic == "tools":
+        tools = cast(list[dict[str, str]], snapshot["tools"])
+        console.print()
+        console.print("[bold]  Debug: Tools[/bold]")
+        for tool in tools:
+            console.print(
+                f"  [cyan]{tool['name']:<16}[/cyan]"
+                f"[dim]risk:{tool['risk']:<6}[/dim]  [dim]{tool['description']}[/dim]"
+            )
+        console.print()
+        return
+
+    if topic == "approvals":
+        approvals = permissions.describe_session_approvals()
+        console.print()
+        console.print("[bold]  Debug: Session Approvals[/bold]")
+        console.print(
+            f"  [dim]yolo_mode[/dim]  "
+            f"[cyan]{permissions.yolo_mode_enabled()}[/cyan]"
+        )
+        if not approvals:
+            console.print("  [dim]No session approvals.[/dim]")
+        for item in approvals:
+            console.print(f"  [cyan]{item['tool']:<16}[/cyan][dim]{item['input_fingerprint']}[/dim]")
+        console.print()
+        return
+
+    if topic == "skills" and skill_loader:
+        console.print()
+        console.print("[bold]  Debug: Skills[/bold]")
+        for meta in skill_loader.get_all_metas():
+            manual = " manual-only" if meta.disable_model_invocation else ""
+            console.print(
+                f"  [cyan]{meta.skill_id:<24}[/cyan]"
+                f"[dim]source:{meta.source} risk:{meta.risk_level}{manual} path:{meta.skill_dir}[/dim]"
+            )
+        console.print()
+        return
+
+    console.print()
+    console.print("[bold]  Debug Topics[/bold]")
+    for topic_name in ("context", "tools", "approvals", "skills"):
+        console.print(f"  [cyan]/debug {topic_name}[/cyan]")
+    console.print()
+
+
 # ─── /model ───────────────────────────────────────────────────────────────────
 
 
@@ -145,38 +237,31 @@ def handle_model_command(
         model = arg
 
     try:
-        provider_config = lookup_provider(provider)
+        new_llm_config = load_llm_config(provider, model, cwd=config.cwd)
+        new_llm = create_llm_from_config(new_llm_config)
     except VicoError as e:
         console.print(f"  [red]✗[/red]  {e}")
         return
 
-    if not provider_config["api_key"]:
-        console.print(
-            f"  [red]✗[/red]  No API key for '{provider}'.  Set [dim]{provider_config['api_key_env']}[/dim] in .env"
-        )
-        return
-
-    try:
-        new_llm = create_llm_from_config(
-            LLMConfig(
-                provider=provider_config["provider"],
-                api_key=provider_config["api_key"],
-                base_url=provider_config["base_url"],
-                model=model,
-                max_tokens=config.llm.max_tokens,
-                temperature=config.llm.temperature,
-            )
-        )
-    except VicoError as e:
-        console.print(f"  [red]✗[/red]  {e}")
-        return
-
+    old_llm = agent.llm
     agent.switch_model(new_llm)
-    config.llm.provider = provider_config["provider"]
-    config.llm.model = model
-    config.llm.base_url = provider_config["base_url"]
-    renderer.set_model_label(provider_config["provider"], model)
+    config.llm = new_llm_config
+    renderer.set_model_label(new_llm_config.provider, new_llm_config.model)
     permissions.clear_session_approvals()
-    console.print(f"  [green]✓[/green]  Switched to [cyan]{provider}/{model}[/cyan]")
+    _close_llm_background(old_llm)
+    console.print(f"  [green]✓[/green]  Switched to [cyan]{new_llm_config.provider}/{new_llm_config.model}[/cyan]")
     console.print("  [dim]New model takes effect from the next message.[/dim]")
     console.print("  [dim]Session tool approvals have been reset.[/dim]")
+
+
+def _close_llm_background(llm: LLM) -> None:
+    async def _close() -> None:
+        try:
+            await llm.aclose()
+        except Exception:
+            pass
+
+    try:
+        asyncio.create_task(_close())
+    except RuntimeError:
+        pass

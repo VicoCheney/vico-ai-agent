@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from vico.tools.base import Tool
+from vico.tools.path_safety import is_sensitive_path
 from vico.tools.types.definition import (
     ToolDefinition,
     ToolParameterSchema,
@@ -81,6 +82,16 @@ class ReadTool(Tool):
                 error=(
                     f"Access denied: '{file_path}' is outside the working directory "
                     f"'{cwd_path}'. Only files within the project root can be read."
+                ),
+            )
+
+        if is_sensitive_path(file_path):
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    f"Refusing to read sensitive file '{file_path}'. "
+                    "Read a sanitized example file instead, or ask the user to inspect it manually."
                 ),
             )
 

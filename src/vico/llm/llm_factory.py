@@ -100,13 +100,21 @@ from vico.llm.providers.mimo import MiMoConfig, MiMoLLM  # noqa: F401, E402
 
 def _deepseek_kwargs(cfg: LLMConfig) -> dict[str, Any]:
     return {
-        "max_tokens": cfg.max_tokens or DEFAULT_MAX_TOKENS,
+        "max_tokens": _bounded_max_tokens(cfg),
         "reasoning_effort": cfg.provider_options.get("reasoning_effort", "max"),
     }
 
 
 def _mimo_kwargs(cfg: LLMConfig) -> dict[str, Any]:
-    return {"max_completion_tokens": cfg.max_tokens or DEFAULT_MAX_TOKENS}
+    return {"max_completion_tokens": _bounded_max_tokens(cfg)}
+
+
+def _bounded_max_tokens(cfg: LLMConfig) -> int:
+    requested = cfg.max_tokens or DEFAULT_MAX_TOKENS
+    info = ALL_MODELS.get(cfg.provider.lower(), {}).get(cfg.model)
+    if not info:
+        return requested
+    return min(requested, info.max_output_tokens)
 
 
 register_provider("deepseek", DeepSeekConfig, DeepSeekLLM, _deepseek_kwargs)

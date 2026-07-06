@@ -234,7 +234,7 @@ risk-level: low
 当前压缩策略是保留最近消息，并插入一条 system note：
 
 ```text
-[Context note: N earlier messages were summarized to save space. The conversation continues below.]
+[Context note: N earlier messages were omitted to stay within budget. The conversation continues below.]
 ```
 
 注意：当前实现是“裁剪 + 说明”，并没有调用 LLM 对旧消息做语义摘要。
@@ -260,7 +260,7 @@ risk-level: low
     }
   },
   "llm": {
-    "default": { "provider": "mimo", "model": "mimo-v2.5" }
+    "default": { "provider": "deepseek", "model": "deepseek-v4-flash" }
   },
   "context": {
     "max_tokens": 1000000,
@@ -268,7 +268,7 @@ risk-level: low
     "compression_threshold": 0.85
   },
   "tools": {
-    "auto_approve": ["low", "medium"],
+    "auto_approve": ["low"],
     "timeout_ms": 30000,
     "env_whitelist": ["PATH", "HOME", "SHELL", "LANG", "TERM"]
   },

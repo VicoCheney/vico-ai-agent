@@ -96,8 +96,8 @@ class TerminalRenderer:
 
     Loading states (TTY only):
     1. waiting spinner  – from reset_output_state() until first LLM chunk
-    2. thinking spinner – dynamic frame + live thinking preview
-    3. generating spinner – while buffering final Markdown for render
+    2. thinking spinner – covers reasoning and final text generation until
+       the current model stream reaches text/tool/done finalization
 
     Spinner animation and tool-row management are delegated to:
       SpinnerController   (cli/spinner.py)
@@ -112,6 +112,7 @@ class TerminalRenderer:
         self._agent_label_printed: bool = False
         self._had_tool_output: bool = False
         self._thinking_active: bool = False
+        self._saw_reasoning: bool = False
         self._thinking_buf: list[str] = []
 
         # Timing + token tracking
@@ -185,6 +186,7 @@ class TerminalRenderer:
         self._agent_label_printed = False
         self._had_tool_output = False
         self._thinking_active = False
+        self._saw_reasoning = False
         self._thinking_buf.clear()
         self._text_buf.clear()
         self._streaming_text = False
@@ -225,47 +227,27 @@ class TerminalRenderer:
     def on_thinking(self, content: str) -> None:
         self._ensure_agent_label()
         self._tools.stop_spinner()
-        self._stop_generating()
         self._stop_live()
-        if not self._thinking_active:
-            self._thinking_active = True
-            self._thinking_spinner.start()
-            write(f"\r{_CLEAR_LINE}")
-            write("\n")
-            if self._had_tool_output:
-                self._had_tool_output = False
-            write(f"{_DIM}🧠 Thinking (0.0s){_RESET}\n")
-            write(f"{_DIM}⠋⠋ …{_RESET}\n")
-            if is_tty() and self._thinking_spinner.task is None:
-                try:
-                    loop = asyncio.get_running_loop()
-                    self._thinking_spinner.task = loop.create_task(self._thinking_spin_loop())
-                except RuntimeError:
-                    pass
+        self._start_thinking_if_needed()
+        self._saw_reasoning = True
         self._thinking_buf.append(content)
 
     def on_text(self, content: str) -> None:
         """Buffer text; rendered via rich.Markdown at flush time."""
         self._ensure_agent_label()
-        if content:
-            self._end_thinking_compact()
-
-        if self._had_tool_output and not self._text_buf:
-            write("\n")
-            self._had_tool_output = False
-
         self._text_buf.append(content)
 
         if content:
+            self._start_thinking_if_needed()
+            if not self._saw_reasoning:
+                self._thinking_buf.append(content)
             self._streaming_text = True
-            if not self._generating.active:
-                self._start_generating()
 
     def on_tool_call(self, tool_call: ToolCall) -> None:
         self._ensure_agent_label()
         self._stop_generating()
-        self._stop_live(finalize=True)
         self._end_thinking_compact()
+        self._stop_live(finalize=True)
 
         name, param = tool_label(tool_call, cwd=self._cwd, skill_paths=self._skill_paths)
         idx = self._tools.size
@@ -296,39 +278,19 @@ class TerminalRenderer:
 
         # Tools through approval dialog: collapse_permission_request() already
         # wrote the summary line; skip overwrite to avoid a duplicate row.
-        was_approved = bool(
-            result.metadata and result.metadata.get("approval") in ("approved", "approved always", "denied")
-        )
+        was_approved = result.approval_label() in ("approved", "approved always", "denied")
         if was_approved:
             self._had_tool_output = True
             return
 
-        # Auto-approved: overwrite spinner row synchronously (single-threaded asyncio).
+        # Auto-approved: overwrite only this row. Keep the batch spinner alive so
+        # slower sibling tool calls continue animating until they finish.
         done_line = fmt_done(result.success, name, param, stat)
         if is_tty():
-            self._tools.stop_spinner()
             self._tools.overwrite_sync(idx, done_line)
         else:
             write(done_line + "\n")
         self._had_tool_output = True
-
-    # ── Generating spinner ───────────────────────────────────────────────────
-
-    def _start_generating(self) -> None:
-        if not is_tty():
-            return
-        self._generating.start()
-        try:
-            loop = asyncio.get_running_loop()
-            self._generating.task = loop.create_task(
-                self._generating.run_phase_spinner([
-                    (0.0, "Generating response"),
-                    (5.0, "Still generating"),
-                    (12.0, "Almost there"),
-                ])
-            )
-        except RuntimeError:
-            self._generating.active = False
 
     def _stop_generating(self) -> None:
         self._generating.stop_line()
@@ -404,8 +366,8 @@ class TerminalRenderer:
         self._stop_thinking_spinner()
         self._tools.stop_spinner()
         self._stop_generating()
-        self._stop_live(finalize=False)
         self._end_thinking_compact()
+        self._stop_live(finalize=False)
         console.print()
         console.print(Text(f"  ✗  {error}", style=f"bold {ERROR}"))
 
@@ -415,6 +377,7 @@ class TerminalRenderer:
     def on_loop(self, iteration: int) -> None:
         self._tools.stop_spinner()
         self._stop_generating()
+        self._end_thinking_compact()
         self._stop_live(finalize=True)
         self._tools.clear()
 
@@ -430,8 +393,8 @@ class TerminalRenderer:
         self._stop_thinking_spinner()
         self._tools.stop_spinner()
         self._stop_generating()
-        self._stop_live(finalize=True)
         self._end_thinking_compact()
+        self._stop_live(finalize=True)
         self._tools.clear()
 
     # ── Internal helpers ─────────────────────────────────────────────────────
@@ -444,6 +407,24 @@ class TerminalRenderer:
             console.print(Text(label, style=AGENT_NAME_STYLE))
             console.print()
             self._agent_label_printed = True
+
+    def _start_thinking_if_needed(self) -> None:
+        if self._thinking_active:
+            return
+        self._thinking_active = True
+        self._thinking_spinner.start()
+        write(f"\r{_CLEAR_LINE}")
+        write("\n")
+        if self._had_tool_output:
+            self._had_tool_output = False
+        write(f"{_DIM}🧠 Thinking (0.0s){_RESET}\n")
+        write(f"{_DIM}⠋⠋ …{_RESET}\n")
+        if is_tty() and self._thinking_spinner.task is None:
+            try:
+                loop = asyncio.get_running_loop()
+                self._thinking_spinner.task = loop.create_task(self._thinking_spin_loop())
+            except RuntimeError:
+                pass
 
     def _end_thinking_compact(self) -> None:
         """Stop the thinking spinner and replace the two-line block with the completed format."""

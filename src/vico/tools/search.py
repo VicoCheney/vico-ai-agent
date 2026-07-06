@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from vico.tools.base import Tool
+from vico.tools.path_safety import SENSITIVE_GREP_EXCLUDES, SENSITIVE_RG_GLOBS, is_sensitive_path
 from vico.tools.types.definition import (
     ToolDefinition,
     ToolParameterSchema,
@@ -120,6 +121,16 @@ class SearchTool(Tool):
                 error=f"Search path not found: {search_path}",
             )
 
+        if search_path.is_file() and is_sensitive_path(search_path):
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    f"Refusing to search sensitive file '{search_path}'. "
+                    "Search a sanitized example file instead, or ask the user to inspect it manually."
+                ),
+            )
+
         use_rg = _has_ripgrep()
         try:
             output = await self._run_search(
@@ -195,6 +206,7 @@ class SearchTool(Tool):
         use_rg: bool,
         cwd: str,
     ) -> str:
+        exclude_sensitive = not Path(search_path).is_file()
         if use_rg:
             cmd = [
                 "rg",
@@ -208,6 +220,9 @@ class SearchTool(Tool):
                 cmd.append("--ignore-case")
             if file_pattern:
                 cmd.extend(["--glob", file_pattern])
+            if exclude_sensitive:
+                for glob in SENSITIVE_RG_GLOBS:
+                    cmd.extend(["--glob", glob])
             cmd.extend([pattern, search_path])
         else:
             cmd = ["grep", "-rn"]
@@ -215,6 +230,9 @@ class SearchTool(Tool):
                 cmd.append("-i")
             if file_pattern:
                 cmd.extend(["--include", file_pattern])
+            if exclude_sensitive:
+                for exclude in SENSITIVE_GREP_EXCLUDES:
+                    cmd.append(f"--exclude={exclude}")
             cmd.extend([pattern, search_path])
 
         result = await asyncio.to_thread(

@@ -12,7 +12,7 @@ from typing import Any
 from vico.core.skill_provider import ISkillProvider
 from vico.tools.base import Tool
 from vico.tools.types.definition import ToolDefinition, ToolParameterSchema
-from vico.tools.types.execution import ToolExecutionContext, ToolResult, ToolRiskLevel
+from vico.tools.types.execution import SkillActivationInfo, ToolExecutionContext, ToolResult, ToolRiskLevel
 
 
 class ActivateSkillTool(Tool):
@@ -84,15 +84,14 @@ class ActivateSkillTool(Tool):
         if reason:
             output += f"\nReason: {reason}"
 
-        return ToolResult(
-            success=True,
-            output=output,
-            metadata={
-                "skill_activation": True,
-                "skill_id": content.meta.skill_id,
-                "skill_name": content.meta.name,
-                "skill_body": content.body,
-                "skill_arguments": arguments,
-                "skill_dir": str(content.meta.skill_dir),
-            },
+        result = ToolResult(success=True, output=output)
+        result.set_skill_activation(
+            SkillActivationInfo(
+                skill_id=content.meta.skill_id,
+                skill_name=content.meta.name,
+                body=content.body,
+                arguments=arguments,
+                skill_dir=str(content.meta.skill_dir),
+            )
         )
+        return result

@@ -159,7 +159,7 @@ class BashTool(Tool):
         else:
             cwd = context.cwd
 
-        timeout_ms = int(params.get("timeout_ms", 30_000))
+        timeout_ms = int(params.get("timeout_ms", context.timeout_ms))
         timeout_sec = timeout_ms / 1000.0
 
         is_interactive, reason = _is_interactive_command(command)
@@ -180,7 +180,7 @@ class BashTool(Tool):
             process = await asyncio.create_subprocess_shell(
                 command,
                 cwd=cwd,
-                env={**os.environ, **context.env},
+                env=context.env,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -288,9 +288,17 @@ class BashTool(Tool):
         else:
             footer = f"\n[Exit code: {exit_code}]"
 
+        result_error: str | None
+        if timed_out:
+            result_error = f"Command timed out after {timeout_ms}ms"
+        elif exit_code != 0:
+            result_error = f"Command exited with code {exit_code}"
+        else:
+            result_error = None
+
         return ToolResult(
             success=(exit_code == 0 and not timed_out),
             output=header + output + footer,
-            error=f"Command exited with code {exit_code}" if exit_code != 0 and not timed_out else None,
+            error=result_error,
             metadata={"exit_code": exit_code, "timed_out": timed_out, "command": command, "cwd": cwd},
         )

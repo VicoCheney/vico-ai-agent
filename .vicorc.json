@@ -27,7 +27,7 @@
       "default_model": "deepseek-v4-flash",
       "models": {
         "deepseek-v4-flash": {
-          "max_tokens": 131072,
+          "max_tokens": 8192,
           "temperature": 1.0,
           "top_p": null,
           "thinking_enabled": true,
@@ -35,7 +35,7 @@
           "response_format": "text"
         },
         "deepseek-v4-pro": {
-          "max_tokens": 131072,
+          "max_tokens": 8192,
           "temperature": 1.0,
           "top_p": null,
           "thinking_enabled": true,
@@ -58,8 +58,7 @@
   },
   "tools": {
     "auto_approve": [
-      "low",
-      "medium"
+      "low"
     ],
     "timeout_ms": 30000,
     "env_whitelist": [

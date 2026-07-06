@@ -30,8 +30,10 @@ sequenceDiagram
 
     alt 任一工具需要审批
         AL->>TK: 串行 execute()，逐个 request_approval()
-    else 全部自动批准
+    else 全部自动批准且无写入类工具
         AL->>TK: asyncio.gather(execute × 6)
+    else 自动批准但包含 write/edit
+        AL->>TK: 按模型输出顺序串行 execute()
     end
 
     Note right of TK: bash/read/search/write/edit<br/>由工具风险级别决定是否审批

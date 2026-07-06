@@ -19,9 +19,11 @@ from rich.console import Console
 
 from vico.cli import theme
 from vico.cli.commands import (
+    handle_debug_command,
     handle_model_command,
     handle_skill_command,
     handle_skills_command,
+    handle_yolo_command,
     print_help,
 )
 from vico.cli.renderer import TerminalRenderer
@@ -131,6 +133,10 @@ async def repl(
             print_help()
             continue
 
+        if user_input == "/yolo":
+            handle_yolo_command(permissions)
+            continue
+
         if user_input.startswith("/model"):
             handle_model_command(user_input, agent, renderer, config, permissions)
             continue
@@ -141,6 +147,10 @@ async def repl(
 
         if user_input.startswith("/skill ") and skill_loader:
             handle_skill_command(user_input, agent, skill_loader)
+            continue
+
+        if user_input.startswith("/debug"):
+            handle_debug_command(user_input, agent, permissions, skill_loader)
             continue
 
         # Run the agent
@@ -157,7 +167,6 @@ async def repl(
             aborted = True
             agent.cancel()
             run_task.cancel()
-            quit_event.set()
 
         _set_sigint(loop, _run_sigint)
 

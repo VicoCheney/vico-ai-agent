@@ -14,7 +14,9 @@ flowchart TD
         HAS_SKILL{"文本包含兼容标签\n<use_skill>?"}
         INJECT["🎯 注入 Skill 正文\nadd_user_message(<skill_instructions>)"]
         AP{"任意工具\n需要审批?"}
+        MUT{"包含 write/edit?"}
         SEQ["🔒 串行执行\n逐个弹确认框"]
+        MUTSEQ["🧱 串行执行\n避免文件写入冲突"]
         PAR["⚡ asyncio.gather\n并发执行自动批准工具"]
         TR["add_tool_result() × N\nmaybe_compress()"]
         DONE["✅ 输出最终回复"]
@@ -32,8 +34,11 @@ flowchart TD
     HAS_SKILL -- "否" --> DONE
     HAS_TOOL -- "有" --> AP
     AP -- "是" --> SEQ
-    AP -- "否" --> PAR
+    AP -- "否" --> MUT
+    MUT -- "是" --> MUTSEQ
+    MUT -- "否" --> PAR
     SEQ --> TR
+    MUTSEQ --> TR
     PAR --> TR
     TR --> LLM
 
@@ -41,5 +46,6 @@ flowchart TD
     style LLM fill:#e3f2fd,stroke:#1565c0,color:#1a1a2e
     style PAR fill:#e8f5e9,stroke:#2e7d32,color:#1a1a2e
     style SEQ fill:#fff3e0,stroke:#e65100,color:#1a1a2e
+    style MUTSEQ fill:#fff3e0,stroke:#e65100,color:#1a1a2e
     style INJECT fill:#f3e5f5,stroke:#9c27b0,color:#1a1a2e
     style DONE fill:#e8f5e9,stroke:#2e7d32,color:#1a1a2e

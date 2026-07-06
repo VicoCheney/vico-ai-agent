@@ -267,7 +267,7 @@ step "Step 5 / 全局安装"
 
 if $GLOBAL_INSTALL; then
   # 检查是否已全局安装且版本一致（幂等：一致则跳过）
-  LOCAL_VER="$(grep -E '^version\s*=' pyproject.toml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+  LOCAL_VER="$(grep -E '^__version__\s*=' src/vico/__init__.py | head -1 | sed -E 's/.*["'\'']([^"'\'']+)["'\''].*/\1/' || true)"
   INSTALLED_VER=""
   if command -v vico &>/dev/null; then
     INSTALLED_VER="$(uv tool list 2>/dev/null | grep 'vico-ai-agent' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"

@@ -6,7 +6,8 @@ Loads .vicorc.json + .env, building the full AgentConfig.
 
 Entry points:
   load_config(cwd=None)   → AgentConfig  (CLI startup, /model reload)
-  lookup_provider(name)   → dict         (/model command runtime lookup)
+  load_llm_config(...)    → LLMConfig    (/model command runtime lookup)
+  lookup_provider(name)   → dict         (legacy provider lookup)
 
 Config discovery walks upward from cwd looking for .vicorc.json, then
 pyproject.toml as fallback. Falls back to VICO_CONFIG_DIR env var,
@@ -117,6 +118,21 @@ def load_config(cwd: str | None = None) -> AgentConfig:
     return AgentConfig(llm=llm, context=context, tools=tools, limits=limits, cwd=working_dir)
 
 
+def load_llm_config(
+    provider_name: str,
+    model_name: str | None = None,
+    cwd: str | None = None,
+) -> LLMConfig:
+    """Load one provider/model config, including model-specific defaults."""
+    if cwd:
+        config_root = _find_config_root(cwd)
+        load_dotenv(dotenv_path=config_root / ".env")
+    else:
+        config_root = _get_config_root()
+    rc = _load_vicorc(config_root)
+    return _parse_llm_config(rc, provider_name=provider_name, model_name=model_name)
+
+
 def lookup_provider(provider_name: str) -> dict[str, str]:
     """Look up a provider's config at runtime (used by /model command)."""
     from vico.llm.models import PROVIDER_DEFAULTS
@@ -146,29 +162,33 @@ def lookup_provider(provider_name: str) -> dict[str, str]:
 # ─── Internal parsers ────────────────────────────────────────────────────────
 
 
-def _parse_llm_config(rc: dict[str, Any]) -> LLMConfig:
+def _parse_llm_config(
+    rc: dict[str, Any],
+    provider_name: str | None = None,
+    model_name: str | None = None,
+) -> LLMConfig:
     llm_section = rc.get("llm", {}).get("default", {})
     providers = rc.get("providers", {})
 
-    provider_name = llm_section.get("provider", "deepseek").lower()
+    resolved_provider = (provider_name or llm_section.get("provider", "deepseek")).lower()
 
-    provider_cfg = providers.get(provider_name, {})
+    provider_cfg = providers.get(resolved_provider, {})
     if not provider_cfg:
         raise ConfigError(
-            f"Provider '{provider_name}' not found in .vicorc.json.\n"
+            f"Provider '{resolved_provider}' not found in .vicorc.json.\n"
             f"Available providers: {', '.join(providers.keys()) if providers else 'none'}"
         )
 
-    api_key_env = provider_cfg.get("api_key_env", f"{provider_name.upper()}_API_KEY")
+    api_key_env = provider_cfg.get("api_key_env", f"{resolved_provider.upper()}_API_KEY")
     api_key = os.environ.get(api_key_env, "")
     if not api_key:
         raise ProviderAuthError(
-            f"Missing API key for provider '{provider_name}'.\n"
+            f"Missing API key for provider '{resolved_provider}'.\n"
             f"Set {api_key_env} in your .env file.\n"
             "See .env.example for reference."
         )
 
-    model = llm_section.get("model", provider_cfg.get("default_model", ""))
+    model = model_name or llm_section.get("model", provider_cfg.get("default_model", ""))
     model_params: dict[str, Any] = provider_cfg.get("models", {}).get(model, {})
 
     def _get(key: str, default: Any) -> Any:
@@ -178,12 +198,14 @@ def _parse_llm_config(rc: dict[str, Any]) -> LLMConfig:
             return provider_cfg[key]
         return default
 
+    requested_max_tokens = _get("max_tokens", _get("max_completion_tokens", DEFAULT_MAX_TOKENS))
+
     return LLMConfig(
-        provider=provider_name,
+        provider=resolved_provider,
         api_key=api_key,
         base_url=provider_cfg.get("base_url", ""),
         model=model,
-        max_tokens=_get("max_tokens", _get("max_completion_tokens", DEFAULT_MAX_TOKENS)),
+        max_tokens=_cap_max_tokens(resolved_provider, model, int(requested_max_tokens)),
         temperature=_get("temperature", 1.0),
         top_p=_get("top_p", None),
         stop=_get("stop", None),
@@ -196,6 +218,16 @@ def _parse_llm_config(rc: dict[str, Any]) -> LLMConfig:
             }.items()
         },
     )
+
+
+def _cap_max_tokens(provider_name: str, model: str, requested: int) -> int:
+    """Keep configured output tokens within the registered model capability."""
+    from vico.llm.models import ALL_MODELS
+
+    info = ALL_MODELS.get(provider_name, {}).get(model)
+    if not info:
+        return requested
+    return min(requested, info.max_output_tokens)
 
 
 def _parse_context_config(rc: dict[str, Any]) -> ContextConfig:

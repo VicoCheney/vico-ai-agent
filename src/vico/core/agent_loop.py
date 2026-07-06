@@ -8,17 +8,16 @@ backward compatibility.
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
-import os
-import re
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from vico.config.types.config import AgentConfig
 from vico.core.context_manager import ContextManager
 from vico.core.permission_controller import PermissionController
 from vico.core.skill_provider import ISkillProvider
+from vico.core.skill_runtime import SkillRuntime
 from vico.core.system_prompt import build_system_prompt
+from vico.core.tool_executor import ToolExecutor
 from vico.core.types import (
     AgentCallbacks,
     AgentState,
@@ -32,10 +31,8 @@ from vico.llm.types.stream import (
     TextChunk,
     ToolCallChunk,
 )
-from vico.skills.types.meta import SkillContent
 from vico.tools.registry import ToolRegistry
 from vico.tools.types.call import ToolCall
-from vico.tools.types.execution import ToolExecutionContext, ToolResult
 
 __all__ = ["AgentCallbacks", "AgentLoop"]
 
@@ -43,12 +40,6 @@ if TYPE_CHECKING:
     from vico.config.types.config import ContextStats
 
 logger = logging.getLogger(__name__)
-
-_APPROVAL_AUTO = "auto approved"
-_APPROVAL_ONCE = "approved"
-_APPROVAL_ALWAYS = "approved always"
-
-_USE_SKILL_RE = re.compile(r"<use_skill>\s*([^<\s]+)\s*</use_skill>", re.IGNORECASE)
 
 
 class AgentLoop:
@@ -74,7 +65,20 @@ class AgentLoop:
         self._system_prompt = build_system_prompt(config.cwd, skill_loader=skill_loader)
         self._state: AgentState = "idle"
         self._cancel_event = asyncio.Event()
-        self._approval_lock = asyncio.Lock()
+        self._skill_runtime = SkillRuntime(
+            skill_loader=skill_loader,
+            context=context,
+            cwd=config.cwd,
+            on_skill_activated=callbacks.on_skill_activated,
+        )
+        self._tool_executor = ToolExecutor(
+            registry=tool_registry,
+            permissions=permissions,
+            config=config,
+            callbacks=callbacks,
+            cancel_event=self._cancel_event,
+            set_state=self._set_state,
+        )
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
@@ -97,6 +101,9 @@ class AgentLoop:
     def cancel(self) -> None:
         """Request cancellation of the current run."""
         self._cancel_event.set()
+
+    def _set_state(self, state: AgentState) -> None:
+        self._state = state
 
     def switch_model(self, llm: LLM) -> None:
         """Hot-swap the LLM provider at runtime."""
@@ -148,15 +155,15 @@ class AgentLoop:
                 tool_calls=[{"id": tc.id, "name": tc.name, "input": tc.input} for tc in pending_tool_calls],
             )
 
-            if self._skill_loader and not pending_tool_calls:
-                skill_injected = self._maybe_inject_skill(accumulated_text)
+            if self._skill_runtime.enabled and not pending_tool_calls:
+                skill_injected = self._skill_runtime.inject_from_legacy_tag(accumulated_text)
                 if skill_injected:
                     continue
 
             if not pending_tool_calls:
                 break
 
-            tool_results = await self._dispatch_tool_calls(pending_tool_calls)
+            tool_results = await self._tool_executor.execute_batch(pending_tool_calls)
 
             for tool_call, result in tool_results:
                 self._context.add_tool_result(
@@ -165,72 +172,11 @@ class AgentLoop:
                     content=result.output if result.success else (result.error or "Unknown error"),
                     is_error=not result.success,
                 )
-                self._maybe_inject_skill_from_tool_result(result)
+                self._skill_runtime.inject_from_tool_result(result)
 
             self._context.maybe_compress(self._system_prompt)
 
     # ─── Skill Injection ──────────────────────────────────────────────────────
-
-    def _format_skill_instructions(self, content: SkillContent, arguments: str = "") -> str:
-        args_block = f"\n<skill_arguments>\n{arguments}\n</skill_arguments>\n" if arguments else ""
-        skill_id = html.escape(content.meta.skill_id, quote=True)
-        name = html.escape(content.meta.name, quote=True)
-        source = html.escape(content.meta.source, quote=True)
-        path = html.escape(str(content.meta.skill_dir), quote=True)
-        body = (
-            content.body
-            .replace("$ARGUMENTS", arguments)
-            .replace("${VICO_SKILL_DIR}", str(content.meta.skill_dir))
-            .replace("${VICO_CWD}", self._config.cwd)
-        )
-        return (
-            f'<skill_instructions id="{skill_id}" '
-            f'name="{name}" '
-            f'source="{source}" '
-            f'path="{path}">\n'
-            f"{args_block}"
-            f"{body}\n"
-            "</skill_instructions>"
-        )
-
-    def _maybe_inject_skill(self, text: str) -> bool:
-        """Detect <use_skill>ID</use_skill> tag and inject the skill body.
-
-        Returns True if a skill was injected (or the tag was consumed).
-        Only the first match per turn is processed.
-        """
-        match = _USE_SKILL_RE.search(text)
-        if not match:
-            return False
-
-        skill_id = match.group(1).strip()
-        if self._skill_loader is None:
-            return False
-
-        content = self._skill_loader.get_skill_content(skill_id)
-        if not content:
-            logger.warning("Skill %r requested but not found.", skill_id)
-            self._context.add_user_message(
-                f"[System] Skill '{skill_id}' was not found. Please proceed without it."
-            )
-            return True
-
-        if content.meta.disable_model_invocation:
-            logger.info("Skill %r has disable_model_invocation=True.", skill_id)
-            self._context.add_user_message(
-                f"[System] Skill '{skill_id}' can only be activated by the user "
-                f"via `/skill {skill_id}`. Please proceed without it."
-            )
-            return True
-
-        self._context.add_user_message(self._format_skill_instructions(content))
-        logger.info("Injected skill %r (%d chars).", skill_id, len(content.body))
-
-        cb = self._callbacks.on_skill_activated
-        if cb:
-            cb(content.meta)
-
-        return True
 
     def inject_skill_by_id(self, skill_id: str, arguments: str = "") -> bool:
         """Inject a skill by ID (user-triggered via /skill command).
@@ -238,42 +184,11 @@ class AgentLoop:
         Bypasses disable_model_invocation — user explicitly requested it.
         Returns True if the skill was found and injected.
         """
-        if not self._skill_loader:
-            return False
-
-        content = self._skill_loader.get_skill_content(skill_id)
-        if not content:
-            return False
-
-        self._context.add_user_message(self._format_skill_instructions(content, arguments=arguments))
-        logger.info("User-injected skill %r (%d chars).", skill_id, len(content.body))
-
-        cb = self._callbacks.on_skill_activated
-        if cb:
-            cb(content.meta)
-
-        return True
-
-    def _maybe_inject_skill_from_tool_result(self, result: ToolResult) -> None:
-        """Inject skill instructions requested by the activate_skill tool."""
-        if not result.success or not result.metadata.get("skill_activation"):
-            return
-
-        if self._skill_loader is None:
-            return
-
-        skill_id = str(result.metadata.get("skill_id", ""))
-        content = self._skill_loader.get_skill_content(skill_id)
-        if not content:
-            return
-
-        arguments = str(result.metadata.get("skill_arguments", ""))
-        self._context.add_user_message(self._format_skill_instructions(content, arguments=arguments))
-        logger.info("Tool-injected skill %r (%d chars).", skill_id, len(content.body))
-
-        cb = self._callbacks.on_skill_activated
-        if cb:
-            cb(content.meta)
+        return self._skill_runtime.inject_by_id(
+            skill_id,
+            arguments=arguments,
+            bypass_manual_only=True,
+        )
 
     # ─── LLM Streaming ────────────────────────────────────────────────────────
 
@@ -328,147 +243,22 @@ class AgentLoop:
 
         return accumulated_text, pending_tool_calls
 
-    async def _dispatch_tool_calls(
-        self,
-        pending_tool_calls: list[ToolCall],
-    ) -> list[tuple[ToolCall, ToolResult]]:
-        """Execute a batch of tool calls.
-
-        Tools requiring approval run sequentially (clean terminal for dialog).
-        Auto-approved tools run concurrently via asyncio.gather.
-        """
-        needs_approval = any(
-            not self._permissions.is_auto_approved(tc, self._tool_registry)
-            for tc in pending_tool_calls
-        )
-
-        cb_tc = self._callbacks.on_tool_call
-
-        if needs_approval:
-            tool_results: list[tuple[ToolCall, ToolResult]] = []
-            for tc in pending_tool_calls:
-                if cb_tc:
-                    cb_tc(tc)
-                result_pair = await self._execute_one(tc)
-                tool_results.append(result_pair)
-            return tool_results
-
-        for tc in pending_tool_calls:
-            if cb_tc:
-                cb_tc(tc)
-        raw_results = await asyncio.gather(
-            *[self._execute_one(tc) for tc in pending_tool_calls],
-            return_exceptions=True,
-        )
-        tool_results = []
-        for tc, outcome in zip(pending_tool_calls, raw_results):
-            if isinstance(outcome, BaseException):
-                err_result = ToolResult(
-                    success=False,
-                    output="",
-                    error=f"Unexpected error: {outcome}",
-                    metadata={"approval": _APPROVAL_AUTO},
-                )
-                cb_tr = self._callbacks.on_tool_result
-                if cb_tr:
-                    cb_tr(tc, err_result)
-                tool_results.append((tc, err_result))
-            else:
-                tool_results.append(outcome)
-        return tool_results
-
-    # Env var names matching these patterns are never forwarded to child processes.
-    _SECRET_PATTERNS: tuple[str, ...] = (
-        "_API_KEY", "_SECRET", "_TOKEN", "_PASSWORD", "_CREDENTIAL",
-        "_AUTH", "_PRIVATE_KEY", "AWS_SECRET", "AWS_ACCESS",
-    )
-
-    def _build_tool_env(self) -> dict[str, str]:
-        """Build the env dict passed to tool child processes.
-
-        Whitelist mode (env_whitelist non-empty): only listed vars + VICO_* + safe defaults.
-        Default mode (empty whitelist): full os.environ minus secret-pattern vars.
-        """
-        whitelist = self._config.tools.env_whitelist
-        safe_defaults = {"PATH", "HOME", "SHELL", "LANG", "TERM", "USER", "TMPDIR", "XDG_CONFIG_HOME"}
-
-        result: dict[str, str] = {}
-        for key, value in os.environ.items():
-            if whitelist:
-                allowed = safe_defaults | set(whitelist)
-                if key in allowed or key.startswith("VICO_"):
-                    result[key] = value
-            else:
-                if not self._is_secret_key(key):
-                    result[key] = value
-        return result
-
-    @classmethod
-    def _is_secret_key(cls, key: str) -> bool:
-        """Return True if the env var name matches a secret/credential pattern."""
-        upper = key.upper()
-        return any(pat in upper for pat in cls._SECRET_PATTERNS)
-
-    async def _execute_one(self, tool_call: ToolCall) -> tuple[ToolCall, ToolResult]:
-        """Permission check → execute → notify UI for a single tool call."""
-        if self._cancel_event.is_set():
-            return tool_call, ToolResult(success=False, output="", error="Cancelled")
-
-        auto_approved = self._permissions.is_auto_approved(tool_call, self._tool_registry)
-        approval_label: str = _APPROVAL_AUTO
-
-        if not auto_approved:
-            async with self._approval_lock:
-                if not self._permissions.is_auto_approved(tool_call, self._tool_registry):
-                    self._state = "waiting_approval"
-                    approval_fn = self._callbacks.request_approval
-                    if approval_fn:
-                        logger.info("Tool %r requires approval", tool_call.name)
-                        decision: Literal["approve", "approve_always", "deny"] = await approval_fn(tool_call)
-                        logger.info("Tool %r decision: %s", tool_call.name, decision)
-                    else:
-                        decision = "deny"
-                    self._state = "running"
-
-                    if decision == "approve_always":
-                        self._permissions.grant_session_approval(tool_call.name)
-                        approval_label = _APPROVAL_ALWAYS
-                    elif decision == "deny":
-                        denied = ToolResult(
-                            success=False,
-                            output="",
-                            error="Tool execution denied by user.",
-                            metadata={"approval": "denied"},
-                        )
-                        cb_tr = self._callbacks.on_tool_result
-                        if cb_tr:
-                            cb_tr(tool_call, denied)
-                        return tool_call, denied
-                    else:
-                        approval_label = _APPROVAL_ONCE
-                else:
-                    approval_label = _APPROVAL_AUTO
-
-        exec_ctx = ToolExecutionContext(
-            cwd=self._config.cwd,
-            env=self._build_tool_env(),
-            cancel_event=self._cancel_event,
-        )
-        logger.info("Executing tool %r (approval=%s)", tool_call.name, approval_label)
-        result = await self._tool_registry.execute(tool_call.name, tool_call.input, exec_ctx)
-        result.metadata["approval"] = approval_label
-        if not result.success:
-            logger.warning("Tool %r failed: %s", tool_call.name, result.error)
-
-        cb_tr = self._callbacks.on_tool_result
-        if cb_tr:
-            cb_tr(tool_call, result)
-
-        return tool_call, result
-
-    def get_context_stats(self, system_prompt: str = "") -> ContextStats:
+    def get_context_stats(self, system_prompt: str | None = None) -> ContextStats:
         """Return current context token usage statistics."""
-        return self._context.get_stats(system_prompt)
+        return self._context.get_stats(self._system_prompt if system_prompt is None else system_prompt)
+
+    def debug_snapshot(self) -> dict[str, object]:
+        """Return compact runtime diagnostics for /debug commands."""
+        return {
+            "state": self._state,
+            "model": {
+                "provider": self._config.llm.provider,
+                "model": self._config.llm.model,
+            },
+            "context": self._context.get_stats(self._system_prompt),
+            "messages": self._context.debug_messages(),
+            "tools": self._tool_registry.describe_tools(),
+        }
 
     def reset(self) -> None:
         """Reset context for a new conversation."""

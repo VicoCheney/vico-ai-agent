@@ -53,7 +53,7 @@ def tool_label(
 
 
 def fmt_stat(result: ToolResult) -> str:
-    approval = result.metadata.get("approval", "") if result.metadata else ""
+    approval = result.approval_label() or ""
     if approval:
         return approval
     if result.success:

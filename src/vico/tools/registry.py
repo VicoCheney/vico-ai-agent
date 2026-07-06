@@ -32,6 +32,17 @@ class ToolRegistry:
         """Return the JSON-schema definitions for all registered tools."""
         return [t.definition for t in self._tools.values()]
 
+    def describe_tools(self) -> list[dict[str, str]]:
+        """Return compact tool metadata for diagnostics."""
+        return [
+            {
+                "name": tool.definition.name,
+                "risk": tool.risk_level,
+                "description": tool.definition.description.splitlines()[0],
+            }
+            for tool in self._tools.values()
+        ]
+
     async def execute(
         self,
         name: str,
